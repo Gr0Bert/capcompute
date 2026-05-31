@@ -2,138 +2,177 @@
 
 This project values simple Go code with clear ownership.
 
-The goal is not to minimize the number of packages.
-The goal is to make it obvious:
+The goal is not to minimize packages. The goal is to make it obvious:
 
-- what a piece of code is for;
-- who owns it;
-- who may use it;
-- whether it is public API or internal implementation.
+- what a package owns;
+- whether a type is public API or implementation detail;
+- which interface an implementation satisfies;
+- why a dependency exists.
 
-When unsure, choose the simplest local design, but do not dump everything into the root package.
+Decide in this order:
 
-Example application structure could be:
+```text
+ownership -> visibility -> package -> file
 ```
-root:
-service.go // owns interface and all the structures this interface speaks in
-service // directory that holds service implementation
-    service_impl.go // implementation of service interface; imagine it needs reader;
-    reader.go // interface required by service_impl.go
-    reader // directory that holds reader's implementation
-        reader_impl.go implementation of reader
-```
-this way user can understand what is implementation of what.
-If there is more than one consumer of the interface it could be extracted to top:
-```
-root:
-    service.go // owns interface and all the structures this interface speaks in
-    service // directory that holds service implementation
-        service_impl.go // implementation of service interface; imagine it needs reader;
-    
-    reader.go // interface required by service_impl.go
-        reader // directory that holds reader's implementation
-        reader_impl.go implementation of reader
-```
+
+Do not start with a file tree and justify it later.
 
 ---
 
-## Core Rules
+## Core Shape
 
-### 1. Start from ownership, not from a file tree
+The root package is the library entrypoint. It should stay small.
 
-Before proposing or changing structure, first identify the main owned concepts.
-Then decide packages and files.
-Do not create a tree first and explain it later.
+For this project, root owns:
+
+```text
+Engine
+New(...)
+Options
+top-level errors
+```
+
+Root may wire defaults, but it should not become a dumping ground for every
+runtime concept.
+
+Domain concepts that users need should live in their own public packages:
+
+```text
+run          // Invocation, Run, Principal, Source, TickResult
+module       // module.Ref
+runtime      // Runtime interface and invoke request/result
+command      // command protocol and command handlers
+capability   // public capability grant configuration
+history      // durable run/event history and Store interface
+```
+
+Implementation-only concepts should live under `internal/`.
 
 ---
 
-### 2. Root package is public API, not a dumping ground
+## Parent Package Owns Vocabulary
 
-The root package should contain the library API users are expected to depend on.
-If a type is not meant for users of the library, it probably should not be exported from root.
-
----
-
-### 3. A directory is a Go package, and a package is a boundary
-
-Do not create packages mechanically.
-
-Do create a package when it has a real responsibility, such as:
-
-- a public API;
-- an internal subsystem;
-- a separate domain vocabulary;
-- multiple implementations;
-- a volatile implementation hidden behind a stable boundary;
-- a need to avoid import cycles.
----
-
-### 4. Consumer owns the interface
-
-Define interfaces where they are used, not where they are implemented.
+If a concept has an interface, the package that owns the interface should also
+own the types spoken by that interface.
 
 Good:
 
-```go
-package search
-
-type IndexReader interface {
-    Read(ctx context.Context, query Query) (Result, error)
-}
-
-type Service struct {
-    index IndexReader
-}
+```text
+history
+  Store
+  Run
+  Event
+  EventType
 ```
 
-The implementation only needs to satisfy the interface:
+Then users of that boundary read clearly:
 
 ```go
-package searchlmdb
-
-type Reader struct {}
-
-func (r *Reader) Read(ctx context.Context, query search.Query) (search.Result, error) {
-    // ...
-}
+history.Store
+history.Run
+history.Event
 ```
+
+Avoid splitting an interface from its vocabulary:
+
+```go
+internal.Store // bad if it speaks in history.Run and history.Event
+```
+
+That makes ownership harder to understand.
 
 ---
 
-### 5. Keep interfaces small
+## Child Packages Are Implementations
 
-Prefer one to three methods.
+When a parent package owns an interface, concrete implementations should live in
+child packages named by implementation strategy, not generic names like `impl`,
+`service`, or `manager`.
 
 Good:
 
-```go
-type ModuleLoader interface {
-    Load(ctx context.Context, source ModuleSource) (*Module, error)
-}
+```text
+history
+  Store
+  Run
+  Event
+
+internal/history/memory
+  MemoryStore
 ```
 
-Suspicious:
+Good:
 
-```go
-type Runtime interface {
-    Load(...)
-    Run(...)
-    Replay(...)
-    RegisterCommand(...)
-    StoreHistory(...)
-    ValidateCapability(...)
-    ApplyLimits(...)
-    Close(...)
-}
+```text
+capability
+  Broker
+  Request
+  Decision
+
+internal/capability/static
+  StaticBroker
 ```
 
-Large interfaces usually mean several responsibilities were mixed together.
+Good:
+
+```text
+internal/replay
+  Matcher
+  Match
+
+internal/replay/strict
+  StrictMatcher
+```
+
+Call sites should explain the relationship:
+
+```go
+var s history.Store = memory.NewMemoryStore()
+var b capability.Broker = static.NewStaticBroker(grants)
+var m replay.Matcher = strict.NewStrictMatcher()
+```
+
+Use compile-time checks in implementation packages when useful:
+
+```go
+var _ history.Store = (*MemoryStore)(nil)
+```
 
 ---
 
-### 6. Use concrete types by default
+## Package Names Should Read Well
 
-Do not create an interface just because it feels clean.
+Package prefixes matter because they appear at call sites.
+
+Prefer:
+
+```go
+run.Invocation
+module.Ref
+runtime.Request
+command.Handler
+capability.Grant
+history.Event
+memory.NewMemoryStore()
+```
+
+Avoid vague prefixes:
+
+```go
+internal.Event
+common.Type
+utils.Hash(...)
+impl.New(...)
+```
+
+If a package name forces aliases everywhere to be readable, reconsider the
+package name.
+
+---
+
+## Interfaces
+
+Define interfaces where they are consumed or where the boundary is owned.
 
 Create an interface only when at least one is true:
 
@@ -141,7 +180,9 @@ Create an interface only when at least one is true:
 - tests need substitution;
 - the dependency performs I/O;
 - the implementation is volatile;
-- the boundary represents a real component/domain separation.
+- the boundary is a real domain or component boundary.
+
+Keep interfaces small. One to three methods is usually enough.
 
 Avoid:
 
@@ -154,100 +195,73 @@ Prefer:
 
 ```go
 type Engine struct {
-    runtime Runtime
+    runtime runtime.Runtime
+    store   history.Store
 }
 ```
 
 ---
 
-### 7. Promote concepts only when they earn it
+## Public vs Internal
 
-Keep code local while it belongs to one owner.
+Public packages are for API users.
 
-Promote a concept into its own package when most of these are true:
+Internal packages are for implementation details the library owns.
 
-- it has its own vocabulary;
-- it can be explained without mentioning only one caller;
-- it has meaningful internal logic;
-- it has multiple implementations;
-- it should be hidden under `internal/`;
-- it changes for different reasons than the caller;
-- keeping it in root makes the root harder to understand.
+Do not export implementation details from root just because they are convenient.
+Do not hide public vocabulary under `internal/` if callers must use it to build
+against the library.
 
-Multiple callers are a good reason to promote.
-They are not the only reason.
-
----
-
-### 8. Avoid the flat-root anti-pattern
-
-This is suspicious for a non-trivial library:
+Examples:
 
 ```text
-engine.go
-run.go
-invocation.go
-module.go
-runtime.go
-command.go
-history.go
-replay.go
-capability.go
-limits.go
-errors.go
-memory_history.go
-static_capability.go
-command_registry.go
+runtime.Runtime      // public: users can provide a runtime backend
+command.Handler      // public: users can register command handlers
+history.Store        // public: users can provide durable history backends
+capability.Broker    // public: users can provide authorization policy
 ```
-
-It may compile, but it hides ownership.
-
-Problems:
-
-- public API and internals are mixed;
-- every concept looks equally important;
-- users can depend on internals accidentally;
-- future refactoring becomes harder.
-
-A flat root package is acceptable only when the library is tiny and all files are part of one coherent public API.
 
 ---
 
-### 9. Import direction
+## Import Direction
+
+Keep dependencies one-way.
 
 Prefer:
 
 ```text
-root package -> internal packages
-cmd/examples -> root package
+root -> public concept packages
+root -> internal boundaries
+internal implementation -> parent boundary
 ```
 
 Avoid:
 
 ```text
-internal package -> root package -> same internal package
+internal package -> root package
 ```
 
-Import cycles are a design smell. Fix ownership instead of fighting the compiler.
+If an import cycle appears, fix ownership. Do not work around it with aliases or
+extra glue packages.
 
 ---
 
-### 11. Tests
+## Tests
 
-Prefer public behavior tests through the root API:
+Test public behavior through the root API when possible:
 
 ```text
 engine_test.go
 ```
 
-Use internal tests for complex subsystems:
+Test implementation details near the implementation:
 
 ```text
-internal/runtime/runtime_test.go
-internal/history/memory_test.go
+internal/history/memory/memory_test.go
+internal/command/hash_test.go
 ```
 
-Do not put all unrelated subsystem tests at root.
+Do not put unrelated subsystem tests at root.
 
 ---
 
@@ -257,28 +271,22 @@ Before creating a file, package, or interface, answer:
 
 1. Who owns this concept?
 2. Is it public API or internal implementation?
-3. Which package should own it?
-4. Is a new package really a boundary, or just a folder?
-5. Is an interface really needed, or is a concrete type enough?
-6. Would this placement still make sense after the next feature?
-7. Am I creating `common`, `utils`, `models`, or a flat root because I did not decide ownership?
+3. Which package should own the vocabulary?
+4. Is this new package a real boundary or just a folder?
+5. Is this interface needed, or would a concrete type be clearer?
+6. Does the package prefix read well at call sites?
+7. Would this placement still make sense after the next implementation?
 
-If ownership is unclear, stop and clarify the ownership first.
+If ownership is unclear, stop and clarify ownership first.
 
 ---
 
 ## Final Rule
 
-Decide in this order:
+Keep the code local, readable, and boring.
 
-```text
-ownership -> visibility -> package -> file
-```
-
-Not the other way around.
-
-Keep public API small.
-Keep internals hidden.
-Keep interfaces small.
-Keep concrete code where abstraction is not needed.
-Do not turn the root package into a junk drawer.
+Use small packages when they express real ownership.
+Use child packages for concrete implementations.
+Keep root small.
+Do not create `common`, `utils`, `models`, `helpers`, `impl`, or flat root files
+because ownership was not decided.

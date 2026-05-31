@@ -5,6 +5,7 @@ import (
 	"errors"
 )
 
+// Command is the internal command identity used for replay and idempotency.
 type Command struct {
 	ID       string
 	Name     string
@@ -13,6 +14,7 @@ type Command struct {
 	ArgsHash string
 }
 
+// New validates the command identity and computes the canonical args hash.
 func New(id, name, mode string, args json.RawMessage) (Command, error) {
 	if id == "" {
 		return Command{}, errors.New("command id is required")

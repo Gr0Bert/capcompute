@@ -1276,9 +1276,6 @@ type CommandSafety struct {
 type UnknownPolicy string
 const (
     UnknownQuarantine UnknownPolicy = "quarantine"
-    UnknownRetry      UnknownPolicy = "retry"
-    UnknownProbe      UnknownPolicy = "probe"
-    UnknownManual     UnknownPolicy = "manual"
 )
 
 ⸻
