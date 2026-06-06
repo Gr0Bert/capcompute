@@ -4,7 +4,6 @@ import (
 	"capcompute/internal/runtime/extism/dispatcher"
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 )
 
@@ -22,21 +21,20 @@ func (testDispatcher) Dispatch(context.Context, testSessionKey, dispatcher.Call)
 	return dispatcher.Result(nil), nil
 }
 
-func TestBeginReplayRequiresReadySession(t *testing.T) {
+func TestBeginReplayRequiresExistingDispatcher(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
 	compute := &ComputeCompiledPlugin[string, testSessionKey]{
 		sessions: map[string]*Session[testSessionKey]{
 			"run-1": {
-				guestData:  key,
-				dispatcher: testDispatcher{},
+				guestData: key,
 			},
 		},
 		active: map[string]struct{}{},
 	}
 
 	_, _, err := compute.beginReplay("run-1")
-	if !errors.Is(err, ErrSessionNotReady) {
-		t.Fatalf("error = %v, want ErrSessionNotReady", err)
+	if err != ErrDispatcherRequired {
+		t.Fatalf("error = %v, want ErrDispatcherRequired", err)
 	}
 }
 
@@ -49,7 +47,6 @@ func TestBeginReplayUsesExistingDispatcher(t *testing.T) {
 			"run-1": {
 				guestData:  key,
 				request:    request,
-				ready:      true,
 				dispatcher: existing,
 				yielded:    &dispatcher.Call{Name: "step.one"},
 			},
@@ -60,9 +57,6 @@ func TestBeginReplayUsesExistingDispatcher(t *testing.T) {
 	session, replayDispatcher, err := compute.beginReplay("run-1")
 	if err != nil {
 		t.Fatalf("begin replay: %v", err)
-	}
-	if session.ready {
-		t.Fatal("session should no longer be ready while replay is active")
 	}
 	if _, ok := compute.active["run-1"]; !ok {
 		t.Fatal("session was not marked active")

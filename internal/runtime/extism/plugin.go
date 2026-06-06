@@ -44,7 +44,6 @@ type Session[K any] struct {
 	guestData  K
 	request    PlayRequest
 	plugin     *extism.Plugin
-	ready      bool
 	dispatcher dispatcher.Dispatcher[K]
 	yielded    *dispatcher.Call
 	err        error
@@ -150,28 +149,6 @@ func (c *ComputeCompiledPlugin[ID, K]) Replay(ctx context.Context, sessionKey ID
 	return results, nil
 }
 
-// Ready reports whether an async result has marked the session ready for another play.
-func (c *ComputeCompiledPlugin[ID, K]) Ready(guestData K) bool {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	session, ok := c.sessions[guestData.SessionKey()]
-	return ok && session.ready
-}
-
-// MarkReady flips the per-session ready flag after an async result has been recorded.
-func (c *ComputeCompiledPlugin[ID, K]) MarkReady(guestData K) bool {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	session, ok := c.sessions[guestData.SessionKey()]
-	if !ok {
-		return false
-	}
-	session.ready = true
-	return true
-}
-
 // Close releases all session instances and the compiled plugin.
 func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 	c.sessionsMu.Lock()
@@ -213,7 +190,6 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey
 		c.active[sessionKey] = struct{}{}
 		session.guestData = guestData
 		session.request = req
-		session.ready = false
 		session.resetPlay()
 		c.sessionsMu.Unlock()
 		return session, nil
@@ -249,14 +225,10 @@ func (c *ComputeCompiledPlugin[ID, K]) beginReplay(sessionKey ID) (*Session[K], 
 	if !ok {
 		return nil, nil, ErrSessionRequired
 	}
-	if !session.ready {
-		return nil, nil, ErrSessionNotReady
-	}
 	if session.dispatcher == nil {
 		return nil, nil, ErrDispatcherRequired
 	}
 	c.active[sessionKey] = struct{}{}
-	session.ready = false
 	return session, session.dispatcher, nil
 }
 
