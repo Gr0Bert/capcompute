@@ -52,7 +52,7 @@ func NewTape(journal Journal) *Tape {
 func (t *Tape) Next(call dispatcher.Call) (dispatcher.Outcome, bool, error) {
 	if t == nil || t.cursor >= t.records.Length() {
 		return dispatcher.Outcome{}, false, nil
-	} // no records here
+	}
 
 	record, err := t.records.Load(t.cursor)
 	if err != nil {
@@ -67,6 +67,27 @@ func (t *Tape) Next(call dispatcher.Call) (dispatcher.Outcome, bool, error) {
 	}
 	t.cursor++
 	return record.Outcome, true, nil
+}
+
+func (t *Tape) Record(call dispatcher.Call, outcome dispatcher.Outcome) error {
+	if t == nil || outcome.Kind() != dispatcher.OutcomeResult {
+		return nil
+	}
+	return t.records.Store(t.records.Length(), call, outcome)
+}
+
+func (t *Tape) Reset() {
+	if t == nil {
+		return
+	}
+	t.cursor = 0
+}
+
+func (t *Tape) Remaining() int {
+	if t == nil {
+		return 0
+	}
+	return t.records.Length() - t.cursor
 }
 
 func sameCall(left dispatcher.Call, right dispatcher.Call) bool {

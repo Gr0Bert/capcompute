@@ -15,6 +15,7 @@ type CompletionChecker interface {
 type Tape interface {
 	Next(call dispatcher.Call) (dispatcher.Outcome, bool, error)
 	Record(call dispatcher.Call, outcome dispatcher.Outcome) error
+	Reset()
 	Remaining() int
 }
 
@@ -32,6 +33,10 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Cal
 	outcome, err = d.next.Dispatch(ctx, key, call)
 	if err != nil {
 		return dispatcher.Outcome{}, err
+	}
+	if outcome.Kind() == dispatcher.OutcomeYield {
+		d.tape.Reset()
+		return outcome, nil
 	}
 	if err := d.tape.Record(call, outcome); err != nil {
 		return dispatcher.Outcome{}, err
