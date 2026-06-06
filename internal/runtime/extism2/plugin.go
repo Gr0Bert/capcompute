@@ -120,8 +120,12 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, re
 	results := make(chan PlayResult[K], 1)
 	go func() {
 		defer close(results)
-		defer c.endPlay(sessionKey)
-		results <- c.play(ctx, sessionKey, guestData, session, dispatcher, req)
+		result := c.play(ctx, sessionKey, guestData, session, dispatcher, req)
+		if err := c.finishPlayResult(ctx, sessionKey, result); err != nil && result.Err == nil {
+			result.Status = PlayFailed
+			result.Err = err
+		}
+		results <- result
 	}()
 	return results, nil
 }
@@ -136,8 +140,12 @@ func (c *ComputeCompiledPlugin[ID, K]) Replay(ctx context.Context, sessionKey ID
 	results := make(chan PlayResult[K], 1)
 	go func() {
 		defer close(results)
-		defer c.endPlay(sessionKey)
-		results <- c.play(ctx, sessionKey, session.guestData, session, dispatcher, session.request)
+		result := c.play(ctx, sessionKey, session.guestData, session, dispatcher, session.request)
+		if err := c.finishPlayResult(ctx, sessionKey, result); err != nil && result.Err == nil {
+			result.Status = PlayFailed
+			result.Err = err
+		}
+		results <- result
 	}()
 	return results, nil
 }
@@ -257,6 +265,27 @@ func (c *ComputeCompiledPlugin[ID, K]) endPlay(sessionKey ID) {
 	defer c.sessionsMu.Unlock()
 
 	delete(c.active, sessionKey)
+}
+
+func (c *ComputeCompiledPlugin[ID, K]) finishPlayResult(ctx context.Context, sessionKey ID, result PlayResult[K]) error {
+	if result.Status == PlayYielded {
+		c.endPlay(sessionKey)
+		return nil
+	}
+	return c.finishSession(ctx, sessionKey)
+}
+
+func (c *ComputeCompiledPlugin[ID, K]) finishSession(ctx context.Context, sessionKey ID) error {
+	c.sessionsMu.Lock()
+	session := c.sessions[sessionKey]
+	delete(c.active, sessionKey)
+	delete(c.sessions, sessionKey)
+	c.sessionsMu.Unlock()
+
+	if session == nil || session.plugin == nil {
+		return nil
+	}
+	return session.plugin.Close(ctx)
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {

@@ -96,3 +96,51 @@ func TestSessionKeepsDispatcherAfterYield(t *testing.T) {
 		t.Fatal("yielded should be cleared after completion")
 	}
 }
+
+func TestFinishPlayResultKeepsYieldedSession(t *testing.T) {
+	key := testSessionKey{id: "run-1"}
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{
+		sessions: map[string]*Session[testSessionKey]{
+			"run-1": {guestData: key},
+		},
+		active: map[string]struct{}{"run-1": {}},
+	}
+
+	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
+		Key:    key,
+		Status: PlayYielded,
+	})
+	if err != nil {
+		t.Fatalf("finish play: %v", err)
+	}
+	if _, ok := compute.active["run-1"]; ok {
+		t.Fatal("yielded session should not remain active")
+	}
+	if _, ok := compute.sessions["run-1"]; !ok {
+		t.Fatal("yielded session should be retained")
+	}
+}
+
+func TestFinishPlayResultRemovesCompletedSession(t *testing.T) {
+	key := testSessionKey{id: "run-1"}
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{
+		sessions: map[string]*Session[testSessionKey]{
+			"run-1": {guestData: key},
+		},
+		active: map[string]struct{}{"run-1": {}},
+	}
+
+	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
+		Key:    key,
+		Status: PlayCompleted,
+	})
+	if err != nil {
+		t.Fatalf("finish play: %v", err)
+	}
+	if _, ok := compute.active["run-1"]; ok {
+		t.Fatal("completed session should not remain active")
+	}
+	if _, ok := compute.sessions["run-1"]; ok {
+		t.Fatal("completed session should be removed")
+	}
+}
