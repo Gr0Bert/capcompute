@@ -1,6 +1,7 @@
 package extism2
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -61,5 +62,27 @@ func TestTapeReportsRemainingRecords(t *testing.T) {
 	}
 	if remaining := tape.Remaining(); remaining != 1 {
 		t.Fatalf("remaining = %d", remaining)
+	}
+}
+
+func TestMemoryTapeDoesNotRecordNewResults(t *testing.T) {
+	tape := NewTape(nil)
+
+	if err := tape.Record(context.Background(), Call{Name: "step.one"}, Result(json.RawMessage(`{"ok":true}`))); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if outcome, ok, err := tape.Next(Call{Name: "step.one"}); err != nil || ok {
+		t.Fatalf("outcome = %#v ok=%v err=%v", outcome, ok, err)
+	}
+}
+
+func TestMemoryTapeDoesNotRecordYield(t *testing.T) {
+	tape := NewTape(nil)
+
+	if err := tape.Record(context.Background(), Call{Name: "step.one"}, Yield("waiting")); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if outcome, ok, err := tape.Next(Call{Name: "step.one"}); err != nil || ok {
+		t.Fatalf("outcome = %#v ok=%v err=%v", outcome, ok, err)
 	}
 }

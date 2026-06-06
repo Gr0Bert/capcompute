@@ -10,11 +10,11 @@ import (
 
 type playStateContextKey struct{}
 
-type playState[K comparable] struct {
-	key     K
-	tape    *Tape
-	yielded *Call
-	err     error
+type playState[K any] struct {
+	key        K
+	dispatcher Dispatcher[K]
+	yielded    *Call
+	err        error
 }
 
 type hostResponse struct {
@@ -23,7 +23,7 @@ type hostResponse struct {
 	Message string          `json:"message,omitempty"`
 }
 
-func (c *ComputeCompiledPlugin[K]) hostFunction() extism.HostFunction {
+func (c *ComputeCompiledPlugin[ID, K]) hostFunction() extism.HostFunction {
 	host := extism.NewHostFunctionWithStack(
 		"play",
 		func(ctx context.Context, plugin *extism.CurrentPlugin, stack []uint64) {
@@ -36,7 +36,7 @@ func (c *ComputeCompiledPlugin[K]) hostFunction() extism.HostFunction {
 	return host
 }
 
-func (c *ComputeCompiledPlugin[K]) dispatchHostCall(ctx context.Context, plugin *extism.CurrentPlugin, offset uint64) uint64 {
+func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plugin *extism.CurrentPlugin, offset uint64) uint64 {
 	state, ok := ctx.Value(playStateContextKey{}).(*playState[K])
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
@@ -63,30 +63,13 @@ func (c *ComputeCompiledPlugin[K]) dispatchHostCall(ctx context.Context, plugin 
 		})
 	}
 
-	outcome, replayed, err := state.tape.Next(call)
+	outcome, err := state.dispatcher.Dispatch(ctx, state.key, call)
 	if err != nil {
 		state.err = err
 		return writeHostResponse(plugin, hostResponse{
 			Status:  OutcomeFailed,
 			Message: err.Error(),
 		})
-	}
-	if !replayed {
-		outcome, err = c.dispatcher.Dispatch(ctx, state.key, call)
-		if err != nil {
-			state.err = err
-			return writeHostResponse(plugin, hostResponse{
-				Status:  OutcomeFailed,
-				Message: err.Error(),
-			})
-		}
-		if err := c.record(ctx, state.key, call, outcome); err != nil {
-			state.err = err
-			return writeHostResponse(plugin, hostResponse{
-				Status:  OutcomeFailed,
-				Message: err.Error(),
-			})
-		}
 	}
 	if outcome.Kind() == OutcomeYield {
 		copied := copyCall(call)

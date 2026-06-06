@@ -9,36 +9,55 @@ type Decision struct {
 }
 
 // Policy decides whether a new call may reach handlers.
-type Policy[K comparable] interface {
+type Policy[K any] interface {
 	Decide(ctx context.Context, key K, call Call) Decision
 }
 
 // PolicyFunc adapts a function into a Policy.
-type PolicyFunc[K comparable] func(context.Context, K, Call) Decision
+type PolicyFunc[K any] func(context.Context, K, Call) Decision
 
 func (f PolicyFunc[K]) Decide(ctx context.Context, key K, call Call) Decision {
 	return f(ctx, key, call)
 }
 
 // Handlers execute named host functions requested by a guest.
-type Handlers[K comparable] interface {
+type Handlers[K any] interface {
 	Execute(ctx context.Context, key K, call Call) (Outcome, error)
 }
 
 // HandlerFunc adapts a function into Handlers.
-type HandlerFunc[K comparable] func(context.Context, K, Call) (Outcome, error)
+type HandlerFunc[K any] func(context.Context, K, Call) (Outcome, error)
 
 func (f HandlerFunc[K]) Execute(ctx context.Context, key K, call Call) (Outcome, error) {
 	return f(ctx, key, call)
 }
 
 // Dispatcher owns policy and handler dispatch for new guest calls.
-type Dispatcher[K comparable] interface {
+type Dispatcher[K any] interface {
 	Dispatch(ctx context.Context, key K, call Call) (Outcome, error)
 }
 
+// DispatcherFunc adapts a function into a Dispatcher.
+type DispatcherFunc[K any] func(context.Context, K, Call) (Outcome, error)
+
+func (f DispatcherFunc[K]) Dispatch(ctx context.Context, key K, call Call) (Outcome, error) {
+	return f(ctx, key, call)
+}
+
+// DispatcherFactory creates the dispatcher chain for one play attempt.
+type DispatcherFactory[K any] interface {
+	NewDispatcher(ctx context.Context, key K) (Dispatcher[K], error)
+}
+
+// DispatcherFactoryFunc adapts a function into a DispatcherFactory.
+type DispatcherFactoryFunc[K any] func(context.Context, K) (Dispatcher[K], error)
+
+func (f DispatcherFactoryFunc[K]) NewDispatcher(ctx context.Context, key K) (Dispatcher[K], error) {
+	return f(ctx, key)
+}
+
 // DefaultDispatcher authorizes and executes new calls.
-type DefaultDispatcher[K comparable] struct {
+type DefaultDispatcher[K any] struct {
 	Policy   Policy[K]
 	Handlers Handlers[K]
 }

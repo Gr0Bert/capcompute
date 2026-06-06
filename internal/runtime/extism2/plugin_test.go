@@ -7,21 +7,35 @@ import (
 	"testing"
 )
 
+type testRunKey struct {
+	id   string
+	tags []string
+}
+
+func (k testRunKey) SessionKey() string {
+	return k.id
+}
+
 func TestComputeCompiledPluginRejectsConcurrentPlay(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string]{
-		sessions: map[string]*Session[string]{"run-1": {}},
+	key := testRunKey{id: "run-1", tags: []string{"non-comparable"}}
+	compute := &ComputeCompiledPlugin[string, testRunKey]{
+		sessions: map[string]*Session[testRunKey]{"run-1": {Key: key}},
 		active:   map[string]struct{}{"run-1": {}},
+		dispatchers: DispatcherFactoryFunc[testRunKey](func(context.Context, testRunKey) (Dispatcher[testRunKey], error) {
+			return &DefaultDispatcher[testRunKey]{}, nil
+		}),
 	}
 
-	_, err := compute.Play(context.Background(), "run-1", PlayRequest{})
+	_, err := compute.Play(context.Background(), key, PlayRequest{})
 	if !errors.Is(err, ErrSessionActive) {
 		t.Fatalf("error = %v, want ErrSessionActive", err)
 	}
 }
 
 func TestComputeCompiledPluginRejectsCloseWhileActive(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string]{
-		sessions: map[string]*Session[string]{"run-1": {}},
+	key := testRunKey{id: "run-1", tags: []string{"non-comparable"}}
+	compute := &ComputeCompiledPlugin[string, testRunKey]{
+		sessions: map[string]*Session[testRunKey]{"run-1": {Key: key}},
 		active:   map[string]struct{}{"run-1": {}},
 	}
 
@@ -35,68 +49,24 @@ func TestComputeCompiledPluginRejectsCloseWhileActive(t *testing.T) {
 }
 
 func TestComputeCompiledPluginTracksReadyAndYielded(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string]{
-		sessions: map[string]*Session[string]{"run-1": {}},
+	key := testRunKey{id: "run-1", tags: []string{"non-comparable"}}
+	compute := &ComputeCompiledPlugin[string, testRunKey]{
+		sessions: map[string]*Session[testRunKey]{"run-1": {Key: key}},
 		active:   map[string]struct{}{},
 	}
 
-	if !compute.MarkReady("run-1") {
+	if !compute.MarkReady(key) {
 		t.Fatal("mark ready returned false")
 	}
-	if !compute.Ready("run-1") {
+	if !compute.Ready(key) {
 		t.Fatal("session should be ready")
 	}
 
-	compute.markYielded("run-1", Call{Name: "step.one", Args: json.RawMessage(`{"x":1}`)})
-	if !compute.Ready("run-1") {
+	compute.markYielded(key, Call{Name: "step.one", Args: json.RawMessage(`{"x":1}`)})
+	if !compute.Ready(key) {
 		t.Fatal("yield bookkeeping should not clear a concurrently ready session")
 	}
 	if compute.sessions["run-1"].yielded == nil || compute.sessions["run-1"].yielded.Name != "step.one" {
 		t.Fatalf("yielded = %#v", compute.sessions["run-1"].yielded)
-	}
-}
-
-func TestComputeCompiledPluginRecordsThroughJournal(t *testing.T) {
-	var recordedKey string
-	var recordedCall Call
-	var recordedOutcome Outcome
-	compute := &ComputeCompiledPlugin[string]{
-		journal: JournalFunc[string]{
-			RecordFunc: func(_ context.Context, key string, call Call, outcome Outcome) error {
-				recordedKey = key
-				recordedCall = call
-				recordedOutcome = outcome
-				return nil
-			},
-		},
-	}
-
-	err := compute.record(context.Background(), "run-1", Call{Name: "step.one"}, Result(json.RawMessage(`{"ok":true}`)))
-	if err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	if recordedKey != "run-1" || recordedCall.Name != "step.one" || recordedOutcome.Kind() != OutcomeResult {
-		t.Fatalf("recorded key=%q call=%#v outcome=%#v", recordedKey, recordedCall, recordedOutcome)
-	}
-}
-
-func TestComputeCompiledPluginLoadsRecordsThroughJournal(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string]{
-		journal: JournalFunc[string]{
-			LoadFunc: func(_ context.Context, key string) ([]Record, error) {
-				if key != "run-1" {
-					t.Fatalf("key = %q", key)
-				}
-				return []Record{{Call: Call{Name: "step.one"}, Outcome: Result(json.RawMessage(`{"ok":true}`))}}, nil
-			},
-		},
-	}
-
-	records, err := compute.loadRecords(context.Background(), "run-1")
-	if err != nil {
-		t.Fatalf("load records: %v", err)
-	}
-	if len(records) != 1 || records[0].Call.Name != "step.one" {
-		t.Fatalf("records = %#v", records)
 	}
 }

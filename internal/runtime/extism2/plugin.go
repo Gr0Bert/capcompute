@@ -10,40 +10,44 @@ import (
 
 const defaultEntrypoint = "run"
 
+// SessionKey lets user-owned run data expose the stable identity used for session maps.
+type SessionKey[ID comparable] interface {
+	SessionKey() ID
+}
+
 // Config contains everything needed to compile a module and create per-run instances.
-type Config[K comparable] struct {
+type Config[ID comparable, K SessionKey[ID]] struct {
 	Manifest       extism.Manifest
 	PluginConfig   extism.PluginConfig
 	InstanceConfig extism.PluginInstanceConfig
 	Entrypoint     string
-	Dispatcher     Dispatcher[K]
-	Journal        Journal[K]
+	Dispatchers    DispatcherFactory[K]
 }
 
-// ComputeCompiledPlugin owns one compiled module, its dispatcher, and per-key sessions.
-type ComputeCompiledPlugin[K comparable] struct {
+// ComputeCompiledPlugin owns one compiled module, dispatcher factory, and per-key sessions.
+type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
-	dispatcher     Dispatcher[K]
-	journal        Journal[K]
+	dispatchers    DispatcherFactory[K]
 	instanceConfig extism.PluginInstanceConfig
 	entrypoint     string
 
 	sessionsMu sync.Mutex
-	sessions   map[K]*Session[K]
-	active     map[K]struct{}
+	sessions   map[ID]*Session[K]
+	active     map[ID]struct{}
 }
 
 // Session owns the reusable Extism plugin instance for one key.
 // Session state is not thread-safe; ComputeCompiledPlugin serializes Play per key.
-type Session[K comparable] struct {
+type Session[K any] struct {
+	Key     K
 	plugin  *extism.Plugin
 	ready   bool
 	yielded *Call
 }
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
-func NewComputeCompiledPlugin[K comparable](ctx context.Context, config Config[K]) (*ComputeCompiledPlugin[K], error) {
-	if config.Dispatcher == nil {
+func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Context, config Config[ID, K]) (*ComputeCompiledPlugin[ID, K], error) {
+	if config.Dispatchers == nil {
 		return nil, ErrDispatcherRequired
 	}
 
@@ -52,13 +56,12 @@ func NewComputeCompiledPlugin[K comparable](ctx context.Context, config Config[K
 		entrypoint = defaultEntrypoint
 	}
 
-	compute := &ComputeCompiledPlugin[K]{
-		dispatcher:     config.Dispatcher,
-		journal:        config.Journal,
+	compute := &ComputeCompiledPlugin[ID, K]{
+		dispatchers:    config.Dispatchers,
 		instanceConfig: config.InstanceConfig,
 		entrypoint:     entrypoint,
-		sessions:       make(map[K]*Session[K]),
-		active:         make(map[K]struct{}),
+		sessions:       make(map[ID]*Session[K]),
+		active:         make(map[ID]struct{}),
 	}
 
 	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
@@ -71,11 +74,9 @@ func NewComputeCompiledPlugin[K comparable](ctx context.Context, config Config[K
 	return compute, nil
 }
 
-// PlayRequest is one guest invocation attempt. Records are replayed from the start each time.
+// PlayRequest is one guest invocation attempt.
 type PlayRequest struct {
 	Input      json.RawMessage
-	Records    []Record
-	UseRecords bool
 	Entrypoint string
 }
 
@@ -89,7 +90,7 @@ const (
 )
 
 // PlayResult is delivered when the play goroutine exits.
-type PlayResult[K comparable] struct {
+type PlayResult[K any] struct {
 	Key     K
 	Status  PlayStatus
 	Output  json.RawMessage
@@ -99,46 +100,40 @@ type PlayResult[K comparable] struct {
 }
 
 // Play starts one exclusive guest invocation for key in its own goroutine.
-func (c *ComputeCompiledPlugin[K]) Play(ctx context.Context, key K, req PlayRequest) (<-chan PlayResult[K], error) {
-	records := req.Records
-	if !req.UseRecords {
-		loaded, err := c.loadRecords(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-		records = loaded
+func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, key K, req PlayRequest) (<-chan PlayResult[K], error) {
+	dispatcher, err := c.dispatchers.NewDispatcher(ctx, key)
+	if err != nil {
+		return nil, err
 	}
-
 	session, err := c.beginPlay(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	req.Records = records
 
 	results := make(chan PlayResult[K], 1)
 	go func() {
 		defer close(results)
 		defer c.endPlay(key)
-		results <- c.play(ctx, key, session, req)
+		results <- c.play(ctx, key, session, dispatcher, req)
 	}()
 	return results, nil
 }
 
 // Ready reports whether an async result has marked the session ready for another play.
-func (c *ComputeCompiledPlugin[K]) Ready(key K) bool {
+func (c *ComputeCompiledPlugin[ID, K]) Ready(key K) bool {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	session, ok := c.sessions[key]
+	session, ok := c.sessions[key.SessionKey()]
 	return ok && session.ready
 }
 
 // MarkReady flips the per-session ready flag after an async result has been recorded.
-func (c *ComputeCompiledPlugin[K]) MarkReady(key K) bool {
+func (c *ComputeCompiledPlugin[ID, K]) MarkReady(key K) bool {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	session, ok := c.sessions[key]
+	session, ok := c.sessions[key.SessionKey()]
 	if !ok {
 		return false
 	}
@@ -147,7 +142,7 @@ func (c *ComputeCompiledPlugin[K]) MarkReady(key K) bool {
 }
 
 // Close releases all session instances and the compiled plugin.
-func (c *ComputeCompiledPlugin[K]) Close(ctx context.Context) error {
+func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 	c.sessionsMu.Lock()
 	if len(c.active) > 0 {
 		c.sessionsMu.Unlock()
@@ -155,8 +150,8 @@ func (c *ComputeCompiledPlugin[K]) Close(ctx context.Context) error {
 	}
 	sessions := c.sessions
 	compiled := c.compiled
-	c.sessions = make(map[K]*Session[K])
-	c.active = make(map[K]struct{})
+	c.sessions = make(map[ID]*Session[K])
+	c.active = make(map[ID]struct{})
 	c.compiled = nil
 	c.sessionsMu.Unlock()
 
@@ -177,14 +172,16 @@ func (c *ComputeCompiledPlugin[K]) Close(ctx context.Context) error {
 	return closeErr
 }
 
-func (c *ComputeCompiledPlugin[K]) beginPlay(ctx context.Context, key K) (*Session[K], error) {
+func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, key K) (*Session[K], error) {
+	sessionKey := key.SessionKey()
+
 	c.sessionsMu.Lock()
-	if _, ok := c.active[key]; ok {
+	if _, ok := c.active[sessionKey]; ok {
 		c.sessionsMu.Unlock()
 		return nil, ErrSessionActive
 	}
-	if session, ok := c.sessions[key]; ok {
-		c.active[key] = struct{}{}
+	if session, ok := c.sessions[sessionKey]; ok {
+		c.active[sessionKey] = struct{}{}
 		session.ready = false
 		session.yielded = nil
 		c.sessionsMu.Unlock()
@@ -194,7 +191,7 @@ func (c *ComputeCompiledPlugin[K]) beginPlay(ctx context.Context, key K) (*Sessi
 		c.sessionsMu.Unlock()
 		return nil, ErrCompiledPluginRequired
 	}
-	c.active[key] = struct{}{}
+	c.active[sessionKey] = struct{}{}
 	c.sessionsMu.Unlock()
 
 	plugin, err := c.compiled.Instance(ctx, c.instanceConfig)
@@ -202,26 +199,26 @@ func (c *ComputeCompiledPlugin[K]) beginPlay(ctx context.Context, key K) (*Sessi
 		c.endPlay(key)
 		return nil, err
 	}
-	session := &Session[K]{plugin: plugin}
+	session := &Session[K]{Key: key, plugin: plugin}
 
 	c.sessionsMu.Lock()
-	c.sessions[key] = session
+	c.sessions[sessionKey] = session
 	c.sessionsMu.Unlock()
 	return session, nil
 }
 
-func (c *ComputeCompiledPlugin[K]) endPlay(key K) {
+func (c *ComputeCompiledPlugin[ID, K]) endPlay(key K) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	delete(c.active, key)
+	delete(c.active, key.SessionKey())
 }
 
-func (c *ComputeCompiledPlugin[K]) markYielded(key K, call Call) {
+func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call Call) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	session, ok := c.sessions[key]
+	session, ok := c.sessions[key.SessionKey()]
 	if !ok {
 		return
 	}
@@ -229,21 +226,7 @@ func (c *ComputeCompiledPlugin[K]) markYielded(key K, call Call) {
 	session.yielded = &copied
 }
 
-func (c *ComputeCompiledPlugin[K]) loadRecords(ctx context.Context, key K) ([]Record, error) {
-	if c.journal == nil {
-		return nil, nil
-	}
-	return c.journal.Load(ctx, key)
-}
-
-func (c *ComputeCompiledPlugin[K]) record(ctx context.Context, key K, call Call, outcome Outcome) error {
-	if c.journal == nil {
-		return nil
-	}
-	return c.journal.Record(ctx, key, call, outcome)
-}
-
-func (c *ComputeCompiledPlugin[K]) play(ctx context.Context, key K, session *Session[K], req PlayRequest) PlayResult[K] {
+func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session *Session[K], dispatcher Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
 		entrypoint = c.entrypoint
@@ -253,8 +236,8 @@ func (c *ComputeCompiledPlugin[K]) play(ctx context.Context, key K, session *Ses
 	}
 
 	state := &playState[K]{
-		key:  key,
-		tape: NewTape(req.Records),
+		key:        session.Key,
+		dispatcher: dispatcher,
 	}
 	callCtx := context.WithValue(ctx, playStateContextKey{}, state)
 
@@ -273,12 +256,9 @@ func (c *ComputeCompiledPlugin[K]) play(ctx context.Context, key K, session *Ses
 			Exit:    exit,
 		}
 	}
-	if remaining := state.tape.Remaining(); remaining > 0 {
-		return PlayResult[K]{
-			Key:    key,
-			Status: PlayFailed,
-			Exit:   exit,
-			Err:    ReplayIncompleteError{Remaining: remaining},
+	if checker, ok := dispatcher.(CompletionChecker); ok {
+		if err := checker.CheckCompleted(); err != nil {
+			return PlayResult[K]{Key: key, Status: PlayFailed, Exit: exit, Err: err}
 		}
 	}
 	return PlayResult[K]{
