@@ -85,7 +85,7 @@ func copyExtismPaths(paths map[string]string) map[string]string {
 	return copied
 }
 
-// WithStore replaces the default in-memory run/event store.
+// WithStore replaces the host in-memory run/event store.
 func WithStore(store history.Store) Option {
 	return func(engine *Engine) {
 		engine.store = store
@@ -97,7 +97,7 @@ func WithFileStore(path string) Option {
 	return WithStore(filehistory.NewStore(path))
 }
 
-// WithCapabilityBroker replaces the default static grant broker.
+// WithCapabilityBroker replaces the host static grant broker.
 func WithCapabilityBroker(broker capability.Broker) Option {
 	return func(engine *Engine) {
 		engine.capabilities = broker
@@ -111,7 +111,7 @@ func WithCommandHandler(name string, handler command.Handler) Option {
 	}
 }
 
-// WithGrant adds a static capability grant used by the default broker.
+// WithGrant adds a static capability grant used by the host broker.
 func WithGrant(grant capability.Grant) Option {
 	return func(engine *Engine) {
 		engine.grants = append(engine.grants, grant)

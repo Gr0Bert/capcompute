@@ -1,8 +1,7 @@
-package extism2
+package dispatcher
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // Call is the guest-to-host function request.
@@ -11,14 +10,18 @@ type Call struct {
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
+func (call Call) Copy() Call {
+	call.Args = append(json.RawMessage(nil), call.Args...)
+	return call
+}
+
 // OutcomeKind identifies a handler or replay result.
 type OutcomeKind string
 
 const (
-	OutcomeResult  OutcomeKind = "result"
-	OutcomeYield   OutcomeKind = "yield"
-	OutcomeUnknown OutcomeKind = "unknown"
-	OutcomeFailed  OutcomeKind = "failed"
+	OutcomeResult OutcomeKind = "result"
+	OutcomeYield  OutcomeKind = "yield"
+	OutcomeFailed OutcomeKind = "failed"
 )
 
 // Outcome is the ADT returned to guest calls.
@@ -34,13 +37,6 @@ func Result(result json.RawMessage) Outcome {
 
 func Yield(message string) Outcome {
 	return Outcome{kind: OutcomeYield, message: message}
-}
-
-func Unknown(message string) Outcome {
-	if message == "" {
-		message = "command outcome unknown"
-	}
-	return Outcome{kind: OutcomeUnknown, message: message}
 }
 
 func Failed(message string) Outcome {
@@ -62,30 +58,16 @@ func (o Outcome) Message() string {
 	return o.message
 }
 
-func copyCall(call Call) Call {
-	call.Args = append(json.RawMessage(nil), call.Args...)
-	return call
+func (o Outcome) Copy() Outcome {
+	o.result = append(json.RawMessage(nil), o.result...)
+	return o
 }
 
-func copyOutcome(outcome Outcome) Outcome {
-	outcome.result = append(json.RawMessage(nil), outcome.result...)
-	return outcome
-}
-
-func validOutcome(outcome Outcome) bool {
-	switch outcome.Kind() {
-	case OutcomeResult, OutcomeYield, OutcomeUnknown, OutcomeFailed:
+func (o Outcome) IsValid() bool {
+	switch o.Kind() {
+	case OutcomeResult, OutcomeYield, OutcomeFailed:
 		return true
 	default:
 		return false
-	}
-}
-
-func terminalOutcomeError(outcome Outcome) error {
-	switch outcome.Kind() {
-	case OutcomeUnknown, OutcomeFailed:
-		return fmt.Errorf("%s: %s", outcome.Kind(), outcome.Message())
-	default:
-		return nil
 	}
 }

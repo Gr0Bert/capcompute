@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"capcompute/internal/runtime/extism2"
 	"capcompute/internal/runtime/extism2/dispatcher"
 	"context"
 	"fmt"
@@ -12,81 +11,61 @@ type CompletionChecker interface {
 	CheckCompleted() error
 }
 
-// NewReplayDispatcher creates one per-play replay decorator.
-func NewReplayDispatcher[K any](tape Tape, next dispatcher.Dispatcher[K]) (*ReplayDispatcher[K], error) {
-	if next == nil {
-		return nil, extism2.ErrDispatcherRequired
-	}
-	if tape == nil {
-		tape = extism2.NewTape(nil)
-	}
-	return &ReplayDispatcher[K]{
-		tape: tape,
-		next: next,
-	}, nil
-}
-
 // Tape owns replay cursor state and decides how newly observed outcomes are stored.
 type Tape interface {
-	Next(call Call) (Outcome, bool, error)
-	Record(call Call, outcome Outcome) error
+	Next(call dispatcher.Call) (dispatcher.Outcome, bool, error)
+	Record(call dispatcher.Call, outcome dispatcher.Outcome) error
 	Remaining() int
 }
 
-// ReplayDispatcher serves recorded outcomes before delegating new calls.
-type ReplayDispatcher[K any] struct {
+// Dispatcher serves recorded outcomes before delegating new calls.
+type Dispatcher[K any] struct {
 	tape Tape
 	next dispatcher.Dispatcher[K]
 }
 
-func (d *ReplayDispatcher[K]) Dispatch(ctx context.Context, key K, call extism2.Call) (extism2.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call) (dispatcher.Outcome, error) {
 	outcome, replayed, err := d.tape.Next(call)
 	if err != nil || replayed {
 		return outcome, err
 	}
 	outcome, err = d.next.Dispatch(ctx, key, call)
 	if err != nil {
-		return extism2.Outcome{}, err
+		return dispatcher.Outcome{}, err
 	}
-	if err := d.tape.Record(ctx, call, outcome); err != nil {
-		return extism2.Outcome{}, err
+	if err := d.tape.Record(call, outcome); err != nil {
+		return dispatcher.Outcome{}, err
 	}
 	return outcome, nil
 }
 
-func (d *ReplayDispatcher[K]) Remaining() int {
+func (d *Dispatcher[K]) Remaining() int {
 	return d.tape.Remaining()
 }
 
-func (d *ReplayDispatcher[K]) CheckCompleted() error {
+func (d *Dispatcher[K]) CheckCompleted() error {
 	if remaining := d.Remaining(); remaining > 0 {
-		return ReplayIncompleteError{Remaining: remaining}
+		return IncompleteError{Remaining: remaining}
 	}
 	return nil
 }
 
-// ReplayDivergedError means the guest requested a different call than history recorded.
-type ReplayDivergedError struct {
+// DivergedError means the guest requested a different call than history recorded.
+type DivergedError struct {
 	Index int
-	Want  Call
-	Got   Call
+	Want  dispatcher.Call
+	Got   dispatcher.Call
 }
 
-func (e ReplayDivergedError) Error() string {
+func (e DivergedError) Error() string {
 	return fmt.Sprintf("replay diverged at call %d: want %q got %q", e.Index, e.Want.Name, e.Got.Name)
 }
 
-// ReplayIncompleteError means the guest completed before replaying all recorded calls.
-type ReplayIncompleteError struct {
+// IncompleteError means the guest completed before replaying all recorded calls.
+type IncompleteError struct {
 	Remaining int
 }
 
-func (e ReplayIncompleteError) Error() string {
+func (e IncompleteError) Error() string {
 	return fmt.Sprintf("replay incomplete: %d recorded calls were not consumed", e.Remaining)
-}
-
-func copyRecord(record Record) Record {
-	record.Call = copyCall(record.Call)
-	record.Outcome = copyOutcome(record.Outcome)
-	return record
 }

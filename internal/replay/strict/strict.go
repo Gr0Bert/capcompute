@@ -12,7 +12,7 @@ type StrictMatcher struct{}
 
 var _ replay.Matcher = (*StrictMatcher)(nil)
 
-// NewStrictMatcher creates the default V1 replay matcher.
+// NewStrictMatcher creates the host V1 replay matcher.
 func NewStrictMatcher() *StrictMatcher {
 	return &StrictMatcher{}
 }

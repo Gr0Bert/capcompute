@@ -9,7 +9,7 @@ type StaticBroker struct {
 
 var _ capability.Broker = (*StaticBroker)(nil)
 
-// NewStaticBroker creates a deny-by-default broker backed by static grants.
+// NewStaticBroker creates a deny-by-host broker backed by static grants.
 func NewStaticBroker(grants []capability.Grant) *StaticBroker {
 	copied := append([]capability.Grant(nil), grants...)
 	return &StaticBroker{grants: copied}

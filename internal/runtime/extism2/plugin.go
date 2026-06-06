@@ -41,10 +41,10 @@ type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 // Session owns the reusable Extism plugin instance for one key.
 // Session state is not thread-safe; ComputeCompiledPlugin serializes Play per key.
 type Session[K any] struct {
-	Key     K
-	plugin  *extism.Plugin
-	ready   bool
-	yielded *Call
+	guestData K
+	plugin    *extism.Plugin
+	ready     bool
+	yielded   *dispatcher.Call
 }
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
@@ -96,7 +96,7 @@ type PlayResult[K any] struct {
 	Key     K
 	Status  PlayStatus
 	Output  json.RawMessage
-	Yielded *Call
+	Yielded *dispatcher.Call
 	Exit    uint32
 	Err     error
 }
@@ -174,8 +174,8 @@ func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 	return closeErr
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, key K) (*Session[K], error) {
-	sessionKey := key.SessionKey()
+func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData K) (*Session[K], error) {
+	sessionKey := guestData.SessionKey()
 
 	c.sessionsMu.Lock()
 	if _, ok := c.active[sessionKey]; ok {
@@ -198,10 +198,10 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, key K) (*S
 
 	plugin, err := c.compiled.Instance(ctx, c.instanceConfig)
 	if err != nil {
-		c.endPlay(key)
+		c.endPlay(guestData)
 		return nil, err
 	}
-	session := &Session[K]{Key: key, plugin: plugin}
+	session := &Session[K]{guestData: guestData, plugin: plugin}
 
 	c.sessionsMu.Lock()
 	c.sessions[sessionKey] = session
@@ -209,14 +209,14 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, key K) (*S
 	return session, nil
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) endPlay(key K) {
+func (c *ComputeCompiledPlugin[ID, K]) endPlay(guestData K) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	delete(c.active, key.SessionKey())
+	delete(c.active, guestData.SessionKey())
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call Call) {
+func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call dispatcher.Call) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
@@ -224,11 +224,11 @@ func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call Call) {
 	if !ok {
 		return
 	}
-	copied := copyCall(call)
+	copied := call.Copy()
 	session.yielded = &copied
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
+func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
 		entrypoint = c.entrypoint
@@ -238,21 +238,21 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session 
 	}
 
 	state := &playState[K]{
-		key:        session.Key,
+		guestData:  session.guestData,
 		dispatcher: dispatcher,
 	}
 	callCtx := context.WithValue(ctx, playStateContextKey{}, state)
 
 	exit, output, err := session.plugin.CallWithContext(callCtx, entrypoint, req.Input)
 	if state.err != nil {
-		return PlayResult[K]{Key: key, Status: PlayFailed, Exit: exit, Err: state.err}
+		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: state.err}
 	}
 	if err != nil {
-		return PlayResult[K]{Key: key, Status: PlayFailed, Exit: exit, Err: err}
+		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 	}
 	if state.yielded != nil {
 		return PlayResult[K]{
-			Key:     key,
+			Key:     guestData,
 			Status:  PlayYielded,
 			Yielded: state.yielded,
 			Exit:    exit,
@@ -260,11 +260,11 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session 
 	}
 	if checker, ok := dispatcher.(replay.CompletionChecker); ok {
 		if err := checker.CheckCompleted(); err != nil {
-			return PlayResult[K]{Key: key, Status: PlayFailed, Exit: exit, Err: err}
+			return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 		}
 	}
 	return PlayResult[K]{
-		Key:    key,
+		Key:    guestData,
 		Status: PlayCompleted,
 		Output: append(json.RawMessage(nil), output...),
 		Exit:   exit,

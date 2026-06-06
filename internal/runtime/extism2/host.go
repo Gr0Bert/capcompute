@@ -4,6 +4,7 @@ import (
 	dispatcher2 "capcompute/internal/runtime/extism2/dispatcher"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	extism "github.com/extism/go-sdk"
@@ -12,16 +13,16 @@ import (
 type playStateContextKey struct{}
 
 type playState[K any] struct {
-	key        K
+	guestData  K
 	dispatcher dispatcher2.Dispatcher[K]
-	yielded    *Call
+	yielded    *dispatcher2.Call
 	err        error
 }
 
 type hostResponse struct {
-	Status  OutcomeKind     `json:"status"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Message string          `json:"message,omitempty"`
+	Status  dispatcher2.OutcomeKind `json:"status"`
+	Result  json.RawMessage         `json:"result,omitempty"`
+	Message string                  `json:"message,omitempty"`
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) hostFunction() extism.HostFunction {
@@ -41,7 +42,7 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	state, ok := ctx.Value(playStateContextKey{}).(*playState[K])
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
-			Status:  OutcomeFailed,
+			Status:  dispatcher2.OutcomeFailed,
 			Message: "play state missing from context",
 		})
 	}
@@ -50,35 +51,35 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	if err != nil {
 		state.err = fmt.Errorf("read call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
-			Status:  OutcomeFailed,
+			Status:  dispatcher2.OutcomeFailed,
 			Message: state.err.Error(),
 		})
 	}
 
-	var call Call
+	var call dispatcher2.Call
 	if err := json.Unmarshal(data, &call); err != nil {
 		state.err = fmt.Errorf("decode call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
-			Status:  OutcomeFailed,
+			Status:  dispatcher2.OutcomeFailed,
 			Message: state.err.Error(),
 		})
 	}
 
-	outcome, err := state.dispatcher.Dispatch(ctx, state.key, call)
+	outcome, err := state.dispatcher.Dispatch(ctx, state.guestData, call)
 	if err != nil {
 		state.err = err
 		return writeHostResponse(plugin, hostResponse{
-			Status:  OutcomeFailed,
+			Status:  dispatcher2.OutcomeFailed,
 			Message: err.Error(),
 		})
 	}
-	if outcome.Kind() == OutcomeYield {
-		copied := copyCall(call)
-		c.markYielded(state.key, copied)
+	if outcome.Kind() == dispatcher2.OutcomeYield {
+		copied := call.Copy()
+		c.markYielded(state.guestData, copied)
 		state.yielded = &copied
 	}
-	if err := terminalOutcomeError(outcome); err != nil {
-		state.err = err
+	if outcome.Kind() == dispatcher2.OutcomeFailed {
+		state.err = errors.New(outcome.Message())
 	}
 
 	return writeHostResponse(plugin, hostResponse{
