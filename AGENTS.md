@@ -1,13 +1,8 @@
 # AGENTS.md
 
-This project values simple Go code with clear ownership.
+This repo is the experimental Extism compute runtime.
 
-The goal is not to minimize packages. The goal is to make it obvious:
-
-- what a package owns;
-- whether a type is public API or implementation detail;
-- which interface an implementation satisfies;
-- why a dependency exists.
+Write simple Go. Put code where ownership is obvious.
 
 Decide in this order:
 
@@ -15,278 +10,174 @@ Decide in this order:
 ownership -> visibility -> package -> file
 ```
 
-Do not start with a file tree and justify it later.
+## Current Shape
 
----
+Only `internal/runtime/extism` matters right now.
 
-## Core Shape
+`extism` owns:
 
-The root package is the library entrypoint. It should stay small.
+- `ComputeCompiledPlugin`
+- `Config`
+- `Session`
+- `SessionKey`
+- `PlayRequest`
+- `PlayResult`
+- session lifecycle
+- Extism plugin creation and host callback wiring
 
-For this project, root owns:
+Do not add root packages, public packages, examples, or old engine concepts unless
+explicitly asked.
 
-```text
-Engine
-New(...)
-Options
-top-level errors
-```
+## Ownership Rules
 
-Root may wire defaults, but it should not become a dumping ground for every
-runtime concept.
+Parent packages own interfaces and vocabulary.
 
-Domain concepts that users need should live in their own public packages:
+Child packages own concrete implementations.
 
-```text
-run          // Invocation, Run, Principal, Source, TickResult
-module       // module.Ref
-runtime      // Runtime interface and invoke request/result
-command      // command protocol and command handlers
-capability   // public capability grant configuration
-history      // durable run/event history and Store interface
-```
-
-Implementation-only concepts should live under `internal/`.
-
----
-
-## Parent Package Owns Vocabulary
-
-If a concept has an interface, the package that owns the interface should also
-own the types spoken by that interface.
-
-Good:
+Current boundaries:
 
 ```text
-history
-  Store
-  Run
-  Event
-  EventType
+extism
+  compiled plugin, sessions, Play/Replay lifecycle
+
+extism/dispatcher
+  Dispatcher interface
+  DispatcherFactory interface
+  Call
+  Outcome
+
+extism/dispatcher/host
+  handler-backed Dispatcher implementation
+
+extism/dispatcher/replay
+  replay Dispatcher decorator
+  Tape interface
+
+extism/dispatcher/replay/tape/journaled
+  journal-backed Tape implementation
+  Journal interface
+
+extism/dispatcher/replay/tape/journaled/journal/memory
+  in-memory Journal implementation
 ```
 
-Then users of that boundary read clearly:
-
-```go
-history.Store
-history.Run
-history.Event
-```
-
-Avoid splitting an interface from its vocabulary:
-
-```go
-internal.Store // bad if it speaks in history.Run and history.Event
-```
-
-That makes ownership harder to understand.
-
----
-
-## Child Packages Are Implementations
-
-When a parent package owns an interface, concrete implementations should live in
-child packages named by implementation strategy, not generic names like `impl`,
-`service`, or `manager`.
-
-Good:
-
-```text
-history
-  Store
-  Run
-  Event
-
-internal/history/memory
-  MemoryStore
-```
-
-Good:
-
-```text
-capability
-  Broker
-  Request
-  Decision
-
-internal/capability/static
-  StaticBroker
-```
-
-Good:
-
-```text
-internal/replay
-  Matcher
-  Match
-
-internal/replay/strict
-  StrictMatcher
-```
-
-Call sites should explain the relationship:
-
-```go
-var s history.Store = memory.NewMemoryStore()
-var b capability.Broker = static.NewStaticBroker(grants)
-var m replay.Matcher = strict.NewStrictMatcher()
-```
-
-Use compile-time checks in implementation packages when useful:
-
-```go
-var _ history.Store = (*MemoryStore)(nil)
-```
-
----
-
-## Package Names Should Read Well
-
-Package prefixes matter because they appear at call sites.
-
-Prefer:
-
-```go
-run.Invocation
-module.Ref
-runtime.Request
-command.Handler
-capability.Grant
-history.Event
-memory.NewMemoryStore()
-```
-
-Avoid vague prefixes:
-
-```go
-internal.Event
-common.Type
-utils.Hash(...)
-impl.New(...)
-```
-
-If a package name forces aliases everywhere to be readable, reconsider the
-package name.
-
----
-
-## Interfaces
-
-Define interfaces where they are consumed or where the boundary is owned.
-
-Create an interface only when at least one is true:
-
-- there are multiple implementations;
-- tests need substitution;
-- the dependency performs I/O;
-- the implementation is volatile;
-- the boundary is a real domain or component boundary.
-
-Keep interfaces small. One to three methods is usually enough.
-
-Avoid:
-
-```go
-type EngineInterface interface {}
-type EngineImpl struct {}
-```
-
-Prefer:
-
-```go
-type Engine struct {
-    runtime runtime.Runtime
-    store   history.Store
-}
-```
-
----
-
-## Public vs Internal
-
-Public packages are for API users.
-
-Internal packages are for implementation details the library owns.
-
-Do not export implementation details from root just because they are convenient.
-Do not hide public vocabulary under `internal/` if callers must use it to build
-against the library.
-
-Examples:
-
-```text
-runtime.Runtime      // public: users can provide a runtime backend
-command.Handler      // public: users can register command handlers
-history.Store        // public: users can provide durable history backends
-capability.Broker    // public: users can provide authorization policy
-```
-
----
+If a type appears in an interface method, it belongs with that interface unless
+there is a stronger owner.
 
 ## Import Direction
 
-Keep dependencies one-way.
+Dependencies go downward or sideways to parent boundaries.
 
-Prefer:
+Allowed:
 
 ```text
-root -> public concept packages
-root -> internal boundaries
-internal implementation -> parent boundary
+extism -> dispatcher
+extism -> dispatcher/replay
+dispatcher/host -> dispatcher
+dispatcher/replay -> dispatcher
+journaled -> dispatcher
 ```
 
 Avoid:
 
 ```text
-internal package -> root package
+child package -> extism
+implementation package -> sibling implementation package
 ```
 
-If an import cycle appears, fix ownership. Do not work around it with aliases or
-extra glue packages.
+If an import cycle appears, fix ownership. Do not add glue packages to hide it.
 
----
+## Session Model
+
+`ComputeCompiledPlugin` owns the session map and active-session exclusivity.
+
+`Session` owns:
+
+- guest data
+- original `PlayRequest`
+- reusable Extism plugin instance
+- current dispatcher chain
+- yielded call
+- ready flag
+
+Context passed into Extism host callbacks carries only the session id.
+
+Yielded sessions are retained for replay.
+Completed or failed sessions are finalized and removed.
+
+## Replay Model
+
+Guest code re-enters from the top.
+
+Replay is another invocation of the same session:
+
+- `Play` creates a dispatcher chain.
+- `Yield` keeps that dispatcher chain in the session.
+- async completion is handler/journal responsibility.
+- `Replay(ctx, sessionID)` reuses session guest data, request, and dispatcher.
+
+Do not put async completion or journal-writing APIs on `ComputeCompiledPlugin`.
+
+Replay dispatcher behavior:
+
+- replay from tape when a record exists;
+- delegate upstream when no record exists;
+- record `OutcomeResult`;
+- reset tape on `OutcomeYield`;
+- do not record `OutcomeYield`.
+
+## Package Names
+
+Names must read well at call sites.
+
+Prefer concrete strategy names:
+
+```go
+host.Dispatcher
+replay.Dispatcher
+journaled.Tape
+memory.Journal
+```
+
+Avoid:
+
+```text
+common
+utils
+models
+helpers
+impl
+manager
+service
+```
+
+## Interfaces
+
+Create interfaces only for real boundaries:
+
+- dispatcher chains;
+- tape/replay storage;
+- handler execution;
+- external I/O or test substitution.
+
+Keep interfaces small.
 
 ## Tests
 
-Test public behavior through the root API when possible:
+Put tests next to the package they verify.
 
-```text
-engine_test.go
+Child package tests must not import parent `extism` just for convenience.
+Use the owning package vocabulary directly.
+
+Always run:
+
+```sh
+go test ./...
+go vet ./...
 ```
-
-Test implementation details near the implementation:
-
-```text
-internal/history/memory/memory_test.go
-internal/command/hash_test.go
-```
-
-Do not put unrelated subsystem tests at root.
-
----
-
-## Before Writing Code
-
-Before creating a file, package, or interface, answer:
-
-1. Who owns this concept?
-2. Is it public API or internal implementation?
-3. Which package should own the vocabulary?
-4. Is this new package a real boundary or just a folder?
-5. Is this interface needed, or would a concrete type be clearer?
-6. Does the package prefix read well at call sites?
-7. Would this placement still make sense after the next implementation?
-
-If ownership is unclear, stop and clarify ownership first.
-
----
 
 ## Final Rule
 
-Keep the code local, readable, and boring.
+Keep code local, boring, and ownership-driven.
 
-Use small packages when they express real ownership.
-Use child packages for concrete implementations.
-Keep root small.
-Do not create `common`, `utils`, `models`, `helpers`, `impl`, or flat root files
-because ownership was not decided.
+Do not create files, packages, or interfaces until the owner is clear.

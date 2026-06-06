@@ -1,118 +1,116 @@
 package extism
 
 import (
+	dispatcher2 "capcompute/internal/runtime/extism/dispatcher"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	extismsdk "github.com/extism/go-sdk"
-
-	"capcompute/command"
-	internalcommand "capcompute/internal/command"
+	extism "github.com/extism/go-sdk"
 )
 
-type commandHost struct {
-	results []command.Result
-	emitted *command.Command
+type sessionKeyContextKey struct{}
+
+type hostResponse struct {
+	Status  dispatcher2.OutcomeKind `json:"status"`
+	Result  json.RawMessage         `json:"result,omitempty"`
+	Message string                  `json:"message,omitempty"`
 }
 
-type commandHostKey struct{}
-
-type commandResponse struct {
-	Status  string          `json:"status"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Message string          `json:"message,omitempty"`
-}
-
-func newCommandHost(results []command.Result) *commandHost {
-	return &commandHost{results: append([]command.Result(nil), results...)}
-}
-
-func function() extismsdk.HostFunction {
-	fn := extismsdk.NewHostFunctionWithStack(
-		"command",
-		func(ctx context.Context, plugin *extismsdk.CurrentPlugin, stack []uint64) {
-			host, ok := ctx.Value(commandHostKey{}).(*commandHost)
-			if !ok {
-				outputError(plugin, stack, "command host is missing")
-				return
-			}
-
-			output, err := host.execute(plugin, stack[0])
-			if err != nil {
-				output = commandResponse{Status: "failed", Message: err.Error()}
-			}
-
-			data, err := json.Marshal(output)
-			if err != nil {
-				data = []byte(`{"status":"failed","message":"encode command response"}`)
-			}
-			offset, err := plugin.WriteBytes(data)
-			if err != nil {
-				panic(err)
-			}
-			stack[0] = offset
+func (c *ComputeCompiledPlugin[ID, K]) hostFunction() extism.HostFunction {
+	host := extism.NewHostFunctionWithStack(
+		"play",
+		func(ctx context.Context, plugin *extism.CurrentPlugin, stack []uint64) {
+			stack[0] = c.dispatchHostCall(ctx, plugin, stack[0])
 		},
-		[]extismsdk.ValueType{extismsdk.ValueTypePTR},
-		[]extismsdk.ValueType{extismsdk.ValueTypePTR},
+		[]extism.ValueType{extism.ValueTypePTR},
+		[]extism.ValueType{extism.ValueTypePTR},
 	)
-	fn.SetNamespace("extism:host/workflow")
-	return fn
+	host.SetNamespace("extism:host/compute")
+	return host
 }
 
-func outputError(plugin *extismsdk.CurrentPlugin, stack []uint64, message string) {
-	data, err := json.Marshal(commandResponse{Status: "failed", Message: message})
-	if err != nil {
-		data = []byte(`{"status":"failed","message":"encode command response"}`)
+func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plugin *extism.CurrentPlugin, offset uint64) uint64 {
+	sessionKey, ok := ctx.Value(sessionKeyContextKey{}).(ID)
+	if !ok {
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: "session key missing from context",
+		})
 	}
-	offset, err := plugin.WriteBytes(data)
-	if err != nil {
-		panic(err)
+	session, ok := c.session(sessionKey)
+	if !ok {
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: "session not found",
+		})
 	}
-	stack[0] = offset
-}
+	if session.dispatcher == nil {
+		session.err = errors.New("session dispatcher missing")
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: session.err.Error(),
+		})
+	}
 
-func (h *commandHost) execute(plugin *extismsdk.CurrentPlugin, offset uint64) (commandResponse, error) {
 	data, err := plugin.ReadBytes(offset)
 	if err != nil {
-		return commandResponse{}, fmt.Errorf("read command: %w", err)
+		session.err = fmt.Errorf("read call: %w", err)
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: session.err.Error(),
+		})
 	}
-	return h.handle(data)
+
+	var call dispatcher2.Call
+	if err := json.Unmarshal(data, &call); err != nil {
+		session.err = fmt.Errorf("decode call: %w", err)
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: session.err.Error(),
+		})
+	}
+
+	outcome, err := session.dispatcher.Dispatch(ctx, session.guestData, call)
+	if err != nil {
+		session.err = err
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: err.Error(),
+		})
+	}
+	if outcome.Kind() == dispatcher2.OutcomeYield {
+		session.recordYield(call)
+	}
+	if outcome.Kind() == dispatcher2.OutcomeFailed {
+		session.err = errors.New(outcome.Message())
+	}
+
+	return writeHostResponse(plugin, hostResponse{
+		Status:  outcome.Kind(),
+		Result:  outcome.Result(),
+		Message: outcome.Message(),
+	})
 }
 
-func (h *commandHost) handle(data []byte) (commandResponse, error) {
-	var cmd command.Command
-	if err := json.Unmarshal(data, &cmd); err != nil {
-		return commandResponse{}, fmt.Errorf("decode command: %w", err)
-	}
-	normalized, err := internalcommand.New(cmd.ID, cmd.Name, string(cmd.Mode), cmd.Args)
+func (c *ComputeCompiledPlugin[ID, K]) session(key ID) (*Session[K], bool) {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+
+	session, ok := c.sessions[key]
+	return session, ok
+}
+
+func writeHostResponse(plugin *extism.CurrentPlugin, response hostResponse) uint64 {
+	data, err := json.Marshal(response)
 	if err != nil {
-		return commandResponse{}, err
+		panic(fmt.Errorf("encode host response: %w", err))
 	}
 
-	for _, result := range h.results {
-		if result.ID == cmd.ID {
-			if result.Name != cmd.Name || result.Mode != cmd.Mode || result.ArgsHash != normalized.ArgsHash {
-				return commandResponse{}, fmt.Errorf("nondeterministic command %q: expected %s %s got %s %s",
-					cmd.ID,
-					result.Name,
-					result.ArgsHash,
-					cmd.Name,
-					normalized.ArgsHash,
-				)
-			}
-			return commandResponse{
-				Status: "completed",
-				Result: append(json.RawMessage(nil), result.Result...),
-			}, nil
-		}
+	offset, err := plugin.WriteBytes(data)
+	if err != nil {
+		panic(fmt.Errorf("write host response: %w", err))
 	}
-
-	if h.emitted != nil {
-		return commandResponse{}, fmt.Errorf("workflow emitted multiple unresolved commands in one invocation")
-	}
-
-	cmd.Args = append(json.RawMessage(nil), cmd.Args...)
-	h.emitted = &cmd
-	return commandResponse{Status: "command"}, nil
+	return offset
 }

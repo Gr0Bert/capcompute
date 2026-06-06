@@ -2,10 +2,7 @@ module capcompute
 
 go 1.26
 
-require (
-	github.com/extism/go-pdk v1.1.3
-	github.com/extism/go-sdk v1.7.1
-)
+require github.com/extism/go-sdk v1.7.1
 
 require (
 	github.com/dylibso/observe-sdk/go v0.0.0-20240819160327-2d926c5d788a // indirect
