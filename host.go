@@ -1,7 +1,7 @@
 package capcompute
 
 import (
-	dispatcher2 "capcompute/dispatcher"
+	"capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,9 +13,9 @@ import (
 type sessionKeyContextKey struct{}
 
 type hostResponse struct {
-	Status  dispatcher2.OutcomeKind `json:"status"`
-	Result  json.RawMessage         `json:"result,omitempty"`
-	Message string                  `json:"message,omitempty"`
+	Status  dispatcher.OutcomeKind `json:"status"`
+	Result  json.RawMessage        `json:"result,omitempty"`
+	Message string                 `json:"message,omitempty"`
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) hostFunction() extism.HostFunction {
@@ -35,21 +35,21 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	sessionKey, ok := ctx.Value(sessionKeyContextKey{}).(ID)
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: "session key missing from context",
 		})
 	}
 	session, ok := c.session(sessionKey)
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: "session not found",
 		})
 	}
 	if session.dispatcher == nil {
 		session.err = errors.New("session dispatcher missing")
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: session.err.Error(),
 		})
 	}
@@ -58,16 +58,16 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	if err != nil {
 		session.err = fmt.Errorf("read call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: session.err.Error(),
 		})
 	}
 
-	var call dispatcher2.Call
+	var call dispatcher.Call
 	if err := json.Unmarshal(data, &call); err != nil {
 		session.err = fmt.Errorf("decode call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: session.err.Error(),
 		})
 	}
@@ -76,14 +76,14 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	if err != nil {
 		session.err = err
 		return writeHostResponse(plugin, hostResponse{
-			Status:  dispatcher2.OutcomeFailed,
+			Status:  dispatcher.OutcomeFailed,
 			Message: err.Error(),
 		})
 	}
-	if outcome.Kind() == dispatcher2.OutcomeYield {
+	if outcome.Kind() == dispatcher.OutcomeYield {
 		session.recordYield(call)
 	}
-	if outcome.Kind() == dispatcher2.OutcomeFailed {
+	if outcome.Kind() == dispatcher.OutcomeFailed {
 		session.err = errors.New(outcome.Message())
 	}
 
