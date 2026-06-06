@@ -105,39 +105,41 @@ type PlayResult[K any] struct {
 
 // Play starts one exclusive guest invocation for key in its own goroutine.
 func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, req PlayRequest) (<-chan PlayResult[K], error) {
-	dispatcher, err := c.dispatchers.NewDispatcher(ctx, guestData)
+	sessionKey := guestData.SessionKey()
+	session, err := c.beginPlay(ctx, sessionKey, guestData)
 	if err != nil {
 		return nil, err
 	}
-	session, err := c.beginPlay(ctx, guestData)
+	dispatcher, err := c.dispatchers.NewDispatcher(ctx, guestData)
 	if err != nil {
+		c.endPlay(sessionKey)
 		return nil, err
 	}
 
 	results := make(chan PlayResult[K], 1)
 	go func() {
 		defer close(results)
-		defer c.endPlay(guestData)
-		results <- c.play(ctx, guestData, session, dispatcher, req)
+		defer c.endPlay(sessionKey)
+		results <- c.play(ctx, sessionKey, guestData, session, dispatcher, req)
 	}()
 	return results, nil
 }
 
 // Ready reports whether an async result has marked the session ready for another play.
-func (c *ComputeCompiledPlugin[ID, K]) Ready(key K) bool {
+func (c *ComputeCompiledPlugin[ID, K]) Ready(guestData K) bool {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	session, ok := c.sessions[key.SessionKey()]
+	session, ok := c.sessions[guestData.SessionKey()]
 	return ok && session.ready
 }
 
 // MarkReady flips the per-session ready flag after an async result has been recorded.
-func (c *ComputeCompiledPlugin[ID, K]) MarkReady(key K) bool {
+func (c *ComputeCompiledPlugin[ID, K]) MarkReady(guestData K) bool {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	session, ok := c.sessions[key.SessionKey()]
+	session, ok := c.sessions[guestData.SessionKey()]
 	if !ok {
 		return false
 	}
@@ -176,9 +178,7 @@ func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 	return closeErr
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData K) (*Session[K], error) {
-	sessionKey := guestData.SessionKey()
-
+func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey ID, guestData K) (*Session[K], error) {
 	c.sessionsMu.Lock()
 	if _, ok := c.active[sessionKey]; ok {
 		c.sessionsMu.Unlock()
@@ -187,9 +187,7 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData 
 	if session, ok := c.sessions[sessionKey]; ok {
 		c.active[sessionKey] = struct{}{}
 		session.ready = false
-		session.dispatcher = nil
-		session.yielded = nil
-		session.err = nil
+		session.resetPlay()
 		c.sessionsMu.Unlock()
 		return session, nil
 	}
@@ -202,7 +200,7 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData 
 
 	plugin, err := c.compiled.Instance(ctx, c.instanceConfig)
 	if err != nil {
-		c.endPlay(guestData)
+		c.endPlay(sessionKey)
 		return nil, err
 	}
 	session := &Session[K]{guestData: guestData, plugin: plugin}
@@ -213,14 +211,14 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData 
 	return session, nil
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) endPlay(guestData K) {
+func (c *ComputeCompiledPlugin[ID, K]) endPlay(sessionKey ID) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
-	delete(c.active, guestData.SessionKey())
+	delete(c.active, sessionKey)
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
+func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
 		entrypoint = c.entrypoint
@@ -229,15 +227,10 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, se
 		entrypoint = defaultEntrypoint
 	}
 
-	session.dispatcher = dispatcher
-	session.yielded = nil
-	session.err = nil
-	defer func() {
-		session.dispatcher = nil
-		session.err = nil
-	}()
+	session.startPlay(dispatcher)
+	defer session.finishPlay()
 
-	callCtx := context.WithValue(ctx, sessionKeyContextKey{}, guestData.SessionKey())
+	callCtx := context.WithValue(ctx, sessionKeyContextKey{}, sessionKey)
 
 	exit, output, err := session.plugin.CallWithContext(callCtx, entrypoint, req.Input)
 	if session.err != nil {
@@ -265,4 +258,26 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, se
 		Output: append(json.RawMessage(nil), output...),
 		Exit:   exit,
 	}
+}
+
+func (s *Session[K]) resetPlay() {
+	s.dispatcher = nil
+	s.yielded = nil
+	s.err = nil
+}
+
+func (s *Session[K]) startPlay(dispatcher dispatcher.Dispatcher[K]) {
+	s.dispatcher = dispatcher
+	s.yielded = nil
+	s.err = nil
+}
+
+func (s *Session[K]) finishPlay() {
+	s.dispatcher = nil
+	s.err = nil
+}
+
+func (s *Session[K]) recordYield(call dispatcher.Call) {
+	copied := call.Copy()
+	s.yielded = &copied
 }

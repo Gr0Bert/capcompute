@@ -81,7 +81,7 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 		})
 	}
 	if outcome.Kind() == dispatcher2.OutcomeYield {
-		session.yielded = new(call.Copy())
+		session.recordYield(call)
 	}
 	if outcome.Kind() == dispatcher2.OutcomeFailed {
 		session.err = errors.New(outcome.Message())
