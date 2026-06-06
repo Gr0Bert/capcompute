@@ -1,6 +1,8 @@
 package extism2
 
 import (
+	"capcompute/internal/runtime/extism2/dispatcher"
+	"capcompute/internal/runtime/extism2/dispatcher/replay"
 	"context"
 	"encoding/json"
 	"sync"
@@ -21,13 +23,13 @@ type Config[ID comparable, K SessionKey[ID]] struct {
 	PluginConfig   extism.PluginConfig
 	InstanceConfig extism.PluginInstanceConfig
 	Entrypoint     string
-	Dispatchers    DispatcherFactory[K]
+	Dispatchers    dispatcher.DispatcherFactory[K]
 }
 
 // ComputeCompiledPlugin owns one compiled module, dispatcher factory, and per-key sessions.
 type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
-	dispatchers    DispatcherFactory[K]
+	dispatchers    dispatcher.DispatcherFactory[K]
 	instanceConfig extism.PluginInstanceConfig
 	entrypoint     string
 
@@ -226,7 +228,7 @@ func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call Call) {
 	session.yielded = &copied
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session *Session[K], dispatcher Dispatcher[K], req PlayRequest) PlayResult[K] {
+func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
 		entrypoint = c.entrypoint
@@ -256,7 +258,7 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, key K, session 
 			Exit:    exit,
 		}
 	}
-	if checker, ok := dispatcher.(CompletionChecker); ok {
+	if checker, ok := dispatcher.(replay.CompletionChecker); ok {
 		if err := checker.CheckCompleted(); err != nil {
 			return PlayResult[K]{Key: key, Status: PlayFailed, Exit: exit, Err: err}
 		}

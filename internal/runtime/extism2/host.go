@@ -1,6 +1,7 @@
 package extism2
 
 import (
+	dispatcher2 "capcompute/internal/runtime/extism2/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,7 @@ type playStateContextKey struct{}
 
 type playState[K any] struct {
 	key        K
-	dispatcher Dispatcher[K]
+	dispatcher dispatcher2.Dispatcher[K]
 	yielded    *Call
 	err        error
 }

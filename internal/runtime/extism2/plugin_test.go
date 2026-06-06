@@ -1,6 +1,7 @@
 package extism2
 
 import (
+	"capcompute/internal/runtime/extism2/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,8 +22,8 @@ func TestComputeCompiledPluginRejectsConcurrentPlay(t *testing.T) {
 	compute := &ComputeCompiledPlugin[string, testRunKey]{
 		sessions: map[string]*Session[testRunKey]{"run-1": {Key: key}},
 		active:   map[string]struct{}{"run-1": {}},
-		dispatchers: DispatcherFactoryFunc[testRunKey](func(context.Context, testRunKey) (Dispatcher[testRunKey], error) {
-			return &DefaultDispatcher[testRunKey]{}, nil
+		dispatchers: dispatcher.DispatcherFactoryFunc[testRunKey](func(context.Context, testRunKey) (dispatcher.Dispatcher[testRunKey], error) {
+			return &dispatcher.DefaultDispatcher[testRunKey]{}, nil
 		}),
 	}
 
