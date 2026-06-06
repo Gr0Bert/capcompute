@@ -1,4 +1,4 @@
-package extism
+package capcompute
 
 import "errors"
 

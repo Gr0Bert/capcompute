@@ -1,7 +1,7 @@
 package replay
 
 import (
-	"capcompute/internal/runtime/extism/dispatcher"
+	dispatcher2 "capcompute/dispatcher"
 	"context"
 	"fmt"
 )
@@ -13,8 +13,8 @@ type CompletionChecker interface {
 
 // Tape owns replay cursor state and decides how newly observed outcomes are stored.
 type Tape interface {
-	Next(call dispatcher.Call) (dispatcher.Outcome, bool, error)
-	Record(call dispatcher.Call, outcome dispatcher.Outcome) error
+	Next(call dispatcher2.Call) (dispatcher2.Outcome, bool, error)
+	Record(call dispatcher2.Call, outcome dispatcher2.Outcome) error
 	Reset()
 	Remaining() int
 }
@@ -22,24 +22,24 @@ type Tape interface {
 // Dispatcher serves recorded outcomes before delegating new calls.
 type Dispatcher[K any] struct {
 	tape Tape
-	next dispatcher.Dispatcher[K]
+	next dispatcher2.Dispatcher[K]
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher2.Call) (dispatcher2.Outcome, error) {
 	outcome, replayed, err := d.tape.Next(call)
 	if err != nil || replayed {
 		return outcome, err
 	}
 	outcome, err = d.next.Dispatch(ctx, key, call)
 	if err != nil {
-		return dispatcher.Outcome{}, err
+		return dispatcher2.Outcome{}, err
 	}
-	if outcome.Kind() == dispatcher.OutcomeYield {
+	if outcome.Kind() == dispatcher2.OutcomeYield {
 		d.tape.Reset()
 		return outcome, nil
 	}
 	if err := d.tape.Record(call, outcome); err != nil {
-		return dispatcher.Outcome{}, err
+		return dispatcher2.Outcome{}, err
 	}
 	return outcome, nil
 }
@@ -58,8 +58,8 @@ func (d *Dispatcher[K]) CheckCompleted() error {
 // DivergedError means the guest requested a different call than history recorded.
 type DivergedError struct {
 	Index int
-	Want  dispatcher.Call
-	Got   dispatcher.Call
+	Want  dispatcher2.Call
+	Got   dispatcher2.Call
 }
 
 func (e DivergedError) Error() string {

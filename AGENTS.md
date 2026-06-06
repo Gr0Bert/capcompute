@@ -12,9 +12,9 @@ ownership -> visibility -> package -> file
 
 ## Current Shape
 
-Only `internal/runtime/extism` matters right now.
+The root package is the library entrypoint.
 
-`extism` owns:
+Root `capcompute` owns:
 
 - `ComputeCompiledPlugin`
 - `Config`
@@ -37,27 +37,27 @@ Child packages own concrete implementations.
 Current boundaries:
 
 ```text
-extism
+capcompute
   compiled plugin, sessions, Play/Replay lifecycle
 
-extism/dispatcher
+dispatcher
   Dispatcher interface
   DispatcherFactory interface
   Call
   Outcome
 
-extism/dispatcher/host
+dispatcher/host
   handler-backed Dispatcher implementation
 
-extism/dispatcher/replay
+dispatcher/replay
   replay Dispatcher decorator
   Tape interface
 
-extism/dispatcher/replay/tape/journaled
+dispatcher/replay/tape/journaled
   journal-backed Tape implementation
   Journal interface
 
-extism/dispatcher/replay/tape/journaled/journal/memory
+dispatcher/replay/tape/journaled/journal/memory
   in-memory Journal implementation
 ```
 
@@ -71,8 +71,8 @@ Dependencies go downward or sideways to parent boundaries.
 Allowed:
 
 ```text
-extism -> dispatcher
-extism -> dispatcher/replay
+capcompute -> dispatcher
+capcompute -> dispatcher/replay
 dispatcher/host -> dispatcher
 dispatcher/replay -> dispatcher
 journaled -> dispatcher
@@ -81,7 +81,7 @@ journaled -> dispatcher
 Avoid:
 
 ```text
-child package -> extism
+child package -> capcompute
 implementation package -> sibling implementation package
 ```
 
@@ -98,7 +98,6 @@ If an import cycle appears, fix ownership. Do not add glue packages to hide it.
 - reusable Extism plugin instance
 - current dispatcher chain
 - yielded call
-- ready flag
 
 Context passed into Extism host callbacks carries only the session id.
 
@@ -166,7 +165,7 @@ Keep interfaces small.
 
 Put tests next to the package they verify.
 
-Child package tests must not import parent `extism` just for convenience.
+Child package tests must not import parent `capcompute` just for convenience.
 Use the owning package vocabulary directly.
 
 Always run:

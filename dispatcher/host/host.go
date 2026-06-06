@@ -1,7 +1,7 @@
 package host
 
 import (
-	"capcompute/internal/runtime/extism/dispatcher"
+	"capcompute/dispatcher"
 	"context"
 	"errors"
 )

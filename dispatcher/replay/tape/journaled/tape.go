@@ -2,7 +2,7 @@ package journaled
 
 import (
 	"bytes"
-	"capcompute/internal/runtime/extism/dispatcher"
+	"capcompute/dispatcher"
 	"fmt"
 )
 

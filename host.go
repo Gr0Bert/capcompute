@@ -1,7 +1,7 @@
-package extism
+package capcompute
 
 import (
-	dispatcher2 "capcompute/internal/runtime/extism/dispatcher"
+	dispatcher2 "capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"

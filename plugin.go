@@ -1,8 +1,8 @@
-package extism
+package capcompute
 
 import (
-	"capcompute/internal/runtime/extism/dispatcher"
-	"capcompute/internal/runtime/extism/dispatcher/replay"
+	dispatcher2 "capcompute/dispatcher"
+	"capcompute/dispatcher/replay"
 	"context"
 	"encoding/json"
 	"sync"
@@ -23,13 +23,13 @@ type Config[ID comparable, K SessionKey[ID]] struct {
 	PluginConfig   extism.PluginConfig
 	InstanceConfig extism.PluginInstanceConfig
 	Entrypoint     string
-	Dispatchers    dispatcher.DispatcherFactory[K]
+	Dispatchers    dispatcher2.DispatcherFactory[K]
 }
 
 // ComputeCompiledPlugin owns one compiled module, dispatcher factory, and per-key sessions.
 type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
-	dispatchers    dispatcher.DispatcherFactory[K]
+	dispatchers    dispatcher2.DispatcherFactory[K]
 	instanceConfig extism.PluginInstanceConfig
 	entrypoint     string
 
@@ -44,8 +44,8 @@ type Session[K any] struct {
 	guestData  K
 	request    PlayRequest
 	plugin     *extism.Plugin
-	dispatcher dispatcher.Dispatcher[K]
-	yielded    *dispatcher.Call
+	dispatcher dispatcher2.Dispatcher[K]
+	yielded    *dispatcher2.Call
 	err        error
 }
 
@@ -98,7 +98,7 @@ type PlayResult[K any] struct {
 	Key     K
 	Status  PlayStatus
 	Output  json.RawMessage
-	Yielded *dispatcher.Call
+	Yielded *dispatcher2.Call
 	Exit    uint32
 	Err     error
 }
@@ -214,7 +214,7 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey
 	return session, nil
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) beginReplay(sessionKey ID) (*Session[K], dispatcher.Dispatcher[K], error) {
+func (c *ComputeCompiledPlugin[ID, K]) beginReplay(sessionKey ID) (*Session[K], dispatcher2.Dispatcher[K], error) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
 
@@ -260,7 +260,7 @@ func (c *ComputeCompiledPlugin[ID, K]) finishSession(ctx context.Context, sessio
 	return session.plugin.Close(ctx)
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
+func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, guestData K, session *Session[K], dispatcher dispatcher2.Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
 		entrypoint = c.entrypoint
@@ -314,7 +314,7 @@ func (s *Session[K]) resetPlay() {
 	s.err = nil
 }
 
-func (s *Session[K]) startPlay(dispatcher dispatcher.Dispatcher[K]) {
+func (s *Session[K]) startPlay(dispatcher dispatcher2.Dispatcher[K]) {
 	s.dispatcher = dispatcher
 	s.yielded = nil
 	s.err = nil
@@ -328,7 +328,7 @@ func (s *Session[K]) finishPlay(keepDispatcher bool) {
 	s.err = nil
 }
 
-func (s *Session[K]) recordYield(call dispatcher.Call) {
+func (s *Session[K]) recordYield(call dispatcher2.Call) {
 	copied := call.Copy()
 	s.yielded = &copied
 }

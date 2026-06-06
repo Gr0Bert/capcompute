@@ -1,7 +1,7 @@
 package replay
 
 import (
-	"capcompute/internal/runtime/extism/dispatcher"
+	"capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"testing"
