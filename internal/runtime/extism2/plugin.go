@@ -41,10 +41,12 @@ type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 // Session owns the reusable Extism plugin instance for one key.
 // Session state is not thread-safe; ComputeCompiledPlugin serializes Play per key.
 type Session[K any] struct {
-	guestData K
-	plugin    *extism.Plugin
-	ready     bool
-	yielded   *dispatcher.Call
+	guestData  K
+	plugin     *extism.Plugin
+	ready      bool
+	dispatcher dispatcher.Dispatcher[K]
+	yielded    *dispatcher.Call
+	err        error
 }
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
@@ -102,12 +104,12 @@ type PlayResult[K any] struct {
 }
 
 // Play starts one exclusive guest invocation for key in its own goroutine.
-func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, key K, req PlayRequest) (<-chan PlayResult[K], error) {
-	dispatcher, err := c.dispatchers.NewDispatcher(ctx, key)
+func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, req PlayRequest) (<-chan PlayResult[K], error) {
+	dispatcher, err := c.dispatchers.NewDispatcher(ctx, guestData)
 	if err != nil {
 		return nil, err
 	}
-	session, err := c.beginPlay(ctx, key)
+	session, err := c.beginPlay(ctx, guestData)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +117,8 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, key K, req Play
 	results := make(chan PlayResult[K], 1)
 	go func() {
 		defer close(results)
-		defer c.endPlay(key)
-		results <- c.play(ctx, key, session, dispatcher, req)
+		defer c.endPlay(guestData)
+		results <- c.play(ctx, guestData, session, dispatcher, req)
 	}()
 	return results, nil
 }
@@ -185,7 +187,9 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, guestData 
 	if session, ok := c.sessions[sessionKey]; ok {
 		c.active[sessionKey] = struct{}{}
 		session.ready = false
+		session.dispatcher = nil
 		session.yielded = nil
+		session.err = nil
 		c.sessionsMu.Unlock()
 		return session, nil
 	}
@@ -216,18 +220,6 @@ func (c *ComputeCompiledPlugin[ID, K]) endPlay(guestData K) {
 	delete(c.active, guestData.SessionKey())
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) markYielded(key K, call dispatcher.Call) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	session, ok := c.sessions[key.SessionKey()]
-	if !ok {
-		return
-	}
-	copied := call.Copy()
-	session.yielded = &copied
-}
-
 func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, session *Session[K], dispatcher dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
 	entrypoint := req.Entrypoint
 	if entrypoint == "" {
@@ -237,24 +229,28 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, guestData K, se
 		entrypoint = defaultEntrypoint
 	}
 
-	state := &playState[K]{
-		guestData:  session.guestData,
-		dispatcher: dispatcher,
-	}
-	callCtx := context.WithValue(ctx, playStateContextKey{}, state)
+	session.dispatcher = dispatcher
+	session.yielded = nil
+	session.err = nil
+	defer func() {
+		session.dispatcher = nil
+		session.err = nil
+	}()
+
+	callCtx := context.WithValue(ctx, sessionKeyContextKey{}, guestData.SessionKey())
 
 	exit, output, err := session.plugin.CallWithContext(callCtx, entrypoint, req.Input)
-	if state.err != nil {
-		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: state.err}
+	if session.err != nil {
+		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: session.err}
 	}
 	if err != nil {
 		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 	}
-	if state.yielded != nil {
+	if session.yielded != nil {
 		return PlayResult[K]{
 			Key:     guestData,
 			Status:  PlayYielded,
-			Yielded: state.yielded,
+			Yielded: session.yielded,
 			Exit:    exit,
 		}
 	}

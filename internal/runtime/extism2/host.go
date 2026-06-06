@@ -10,14 +10,7 @@ import (
 	extism "github.com/extism/go-sdk"
 )
 
-type playStateContextKey struct{}
-
-type playState[K any] struct {
-	guestData  K
-	dispatcher dispatcher2.Dispatcher[K]
-	yielded    *dispatcher2.Call
-	err        error
-}
+type sessionKeyContextKey struct{}
 
 type hostResponse struct {
 	Status  dispatcher2.OutcomeKind `json:"status"`
@@ -39,47 +32,59 @@ func (c *ComputeCompiledPlugin[ID, K]) hostFunction() extism.HostFunction {
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plugin *extism.CurrentPlugin, offset uint64) uint64 {
-	state, ok := ctx.Value(playStateContextKey{}).(*playState[K])
+	sessionKey, ok := ctx.Value(sessionKeyContextKey{}).(ID)
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
 			Status:  dispatcher2.OutcomeFailed,
-			Message: "play state missing from context",
+			Message: "session key missing from context",
+		})
+	}
+	session, ok := c.session(sessionKey)
+	if !ok {
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: "session not found",
+		})
+	}
+	if session.dispatcher == nil {
+		session.err = errors.New("session dispatcher missing")
+		return writeHostResponse(plugin, hostResponse{
+			Status:  dispatcher2.OutcomeFailed,
+			Message: session.err.Error(),
 		})
 	}
 
 	data, err := plugin.ReadBytes(offset)
 	if err != nil {
-		state.err = fmt.Errorf("read call: %w", err)
+		session.err = fmt.Errorf("read call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
 			Status:  dispatcher2.OutcomeFailed,
-			Message: state.err.Error(),
+			Message: session.err.Error(),
 		})
 	}
 
 	var call dispatcher2.Call
 	if err := json.Unmarshal(data, &call); err != nil {
-		state.err = fmt.Errorf("decode call: %w", err)
+		session.err = fmt.Errorf("decode call: %w", err)
 		return writeHostResponse(plugin, hostResponse{
 			Status:  dispatcher2.OutcomeFailed,
-			Message: state.err.Error(),
+			Message: session.err.Error(),
 		})
 	}
 
-	outcome, err := state.dispatcher.Dispatch(ctx, state.guestData, call)
+	outcome, err := session.dispatcher.Dispatch(ctx, session.guestData, call)
 	if err != nil {
-		state.err = err
+		session.err = err
 		return writeHostResponse(plugin, hostResponse{
 			Status:  dispatcher2.OutcomeFailed,
 			Message: err.Error(),
 		})
 	}
 	if outcome.Kind() == dispatcher2.OutcomeYield {
-		copied := call.Copy()
-		c.markYielded(state.guestData, copied)
-		state.yielded = &copied
+		session.yielded = new(call.Copy())
 	}
 	if outcome.Kind() == dispatcher2.OutcomeFailed {
-		state.err = errors.New(outcome.Message())
+		session.err = errors.New(outcome.Message())
 	}
 
 	return writeHostResponse(plugin, hostResponse{
@@ -87,6 +92,14 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 		Result:  outcome.Result(),
 		Message: outcome.Message(),
 	})
+}
+
+func (c *ComputeCompiledPlugin[ID, K]) session(key ID) (*Session[K], bool) {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+
+	session, ok := c.sessions[key]
+	return session, ok
 }
 
 func writeHostResponse(plugin *extism.CurrentPlugin, response hostResponse) uint64 {
