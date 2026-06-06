@@ -25,6 +25,10 @@ type Dispatcher[K any] struct {
 	next dispatcher2.Dispatcher[K]
 }
 
+func NewDispatcher[K any](tape Tape, next dispatcher2.Dispatcher[K]) *Dispatcher[K] {
+	return &Dispatcher[K]{tape: tape, next: next}
+}
+
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher2.Call) (dispatcher2.Outcome, error) {
 	outcome, replayed, err := d.tape.Next(call)
 	if err != nil || replayed {

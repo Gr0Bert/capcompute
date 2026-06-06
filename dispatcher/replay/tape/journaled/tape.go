@@ -43,7 +43,7 @@ func (e ReplayIncompleteError) Error() string {
 	return fmt.Sprintf("replay incomplete: %d recorded calls were not consumed", e.Remaining)
 }
 
-// NewTape creates an in-memory replay tape whose cursor starts at the beginning.
+// NewTape creates a journal-backed replay tape whose cursor starts at the beginning.
 func NewTape(journal Journal) *Tape {
 	return &Tape{journal, 0}
 }
@@ -73,7 +73,11 @@ func (t *Tape) Record(call dispatcher.Call, outcome dispatcher.Outcome) error {
 	if t == nil || outcome.Kind() != dispatcher.OutcomeResult {
 		return nil
 	}
-	return t.records.Store(t.records.Length(), call, outcome)
+	if err := t.records.Store(t.records.Length(), call, outcome); err != nil {
+		return err
+	}
+	t.cursor++
+	return nil
 }
 
 func (t *Tape) Reset() {
