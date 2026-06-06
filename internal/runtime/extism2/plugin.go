@@ -42,6 +42,7 @@ type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 // Session state is not thread-safe; ComputeCompiledPlugin serializes Play per key.
 type Session[K any] struct {
 	guestData  K
+	request    PlayRequest
 	plugin     *extism.Plugin
 	ready      bool
 	dispatcher dispatcher.Dispatcher[K]
@@ -106,7 +107,7 @@ type PlayResult[K any] struct {
 // Play starts one exclusive guest invocation for key in its own goroutine.
 func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, req PlayRequest) (<-chan PlayResult[K], error) {
 	sessionKey := guestData.SessionKey()
-	session, err := c.beginPlay(ctx, sessionKey, guestData)
+	session, err := c.beginPlay(ctx, sessionKey, guestData, req)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +122,22 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, re
 		defer close(results)
 		defer c.endPlay(sessionKey)
 		results <- c.play(ctx, sessionKey, guestData, session, dispatcher, req)
+	}()
+	return results, nil
+}
+
+// Replay starts another invocation for a yielded session using its existing dispatcher chain.
+func (c *ComputeCompiledPlugin[ID, K]) Replay(ctx context.Context, sessionKey ID) (<-chan PlayResult[K], error) {
+	session, dispatcher, err := c.beginReplay(sessionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make(chan PlayResult[K], 1)
+	go func() {
+		defer close(results)
+		defer c.endPlay(sessionKey)
+		results <- c.play(ctx, sessionKey, session.guestData, session, dispatcher, session.request)
 	}()
 	return results, nil
 }
@@ -178,7 +195,7 @@ func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 	return closeErr
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey ID, guestData K) (*Session[K], error) {
+func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey ID, guestData K, req PlayRequest) (*Session[K], error) {
 	c.sessionsMu.Lock()
 	if _, ok := c.active[sessionKey]; ok {
 		c.sessionsMu.Unlock()
@@ -186,6 +203,8 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey
 	}
 	if session, ok := c.sessions[sessionKey]; ok {
 		c.active[sessionKey] = struct{}{}
+		session.guestData = guestData
+		session.request = req
 		session.ready = false
 		session.resetPlay()
 		c.sessionsMu.Unlock()
@@ -203,12 +222,34 @@ func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey
 		c.endPlay(sessionKey)
 		return nil, err
 	}
-	session := &Session[K]{guestData: guestData, plugin: plugin}
+	session := &Session[K]{guestData: guestData, request: req, plugin: plugin}
 
 	c.sessionsMu.Lock()
 	c.sessions[sessionKey] = session
 	c.sessionsMu.Unlock()
 	return session, nil
+}
+
+func (c *ComputeCompiledPlugin[ID, K]) beginReplay(sessionKey ID) (*Session[K], dispatcher.Dispatcher[K], error) {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+
+	if _, ok := c.active[sessionKey]; ok {
+		return nil, nil, ErrSessionActive
+	}
+	session, ok := c.sessions[sessionKey]
+	if !ok {
+		return nil, nil, ErrSessionRequired
+	}
+	if !session.ready {
+		return nil, nil, ErrSessionNotReady
+	}
+	if session.dispatcher == nil {
+		return nil, nil, ErrDispatcherRequired
+	}
+	c.active[sessionKey] = struct{}{}
+	session.ready = false
+	return session, session.dispatcher, nil
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) endPlay(sessionKey ID) {
@@ -228,30 +269,36 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, 
 	}
 
 	session.startPlay(dispatcher)
-	defer session.finishPlay()
 
 	callCtx := context.WithValue(ctx, sessionKeyContextKey{}, sessionKey)
 
 	exit, output, err := session.plugin.CallWithContext(callCtx, entrypoint, req.Input)
 	if session.err != nil {
-		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: session.err}
+		err := session.err
+		session.finishPlay(false)
+		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 	}
 	if err != nil {
+		session.finishPlay(false)
 		return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 	}
 	if session.yielded != nil {
+		yielded := session.yielded
+		session.finishPlay(true)
 		return PlayResult[K]{
 			Key:     guestData,
 			Status:  PlayYielded,
-			Yielded: session.yielded,
+			Yielded: yielded,
 			Exit:    exit,
 		}
 	}
 	if checker, ok := dispatcher.(replay.CompletionChecker); ok {
 		if err := checker.CheckCompleted(); err != nil {
+			session.finishPlay(false)
 			return PlayResult[K]{Key: guestData, Status: PlayFailed, Exit: exit, Err: err}
 		}
 	}
+	session.finishPlay(false)
 	return PlayResult[K]{
 		Key:    guestData,
 		Status: PlayCompleted,
@@ -272,8 +319,11 @@ func (s *Session[K]) startPlay(dispatcher dispatcher.Dispatcher[K]) {
 	s.err = nil
 }
 
-func (s *Session[K]) finishPlay() {
-	s.dispatcher = nil
+func (s *Session[K]) finishPlay(keepDispatcher bool) {
+	if !keepDispatcher {
+		s.dispatcher = nil
+		s.yielded = nil
+	}
 	s.err = nil
 }
 
