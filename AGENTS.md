@@ -48,9 +48,6 @@ dispatcher
   Call
   Outcome
 
-dispatcher/host
-  handler-backed Dispatcher implementation
-
 dispatcher/replay
   replay Dispatcher decorator
   Tape interface
@@ -75,7 +72,6 @@ Allowed:
 ```text
 capcompute -> dispatcher
 capcompute -> dispatcher/replay
-dispatcher/host -> dispatcher
 dispatcher/replay -> dispatcher
 journaled -> dispatcher
 ```
@@ -142,7 +138,6 @@ Names must read well at call sites.
 Prefer concrete strategy names:
 
 ```go
-host.Dispatcher
 replay.Dispatcher
 journaled.Tape
 memory.Journal

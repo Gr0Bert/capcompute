@@ -26,7 +26,6 @@ The root `capcompute` package owns:
 Child packages own concrete implementations and optional strategies:
 
 - `dispatcher` defines `Call`, `Outcome`, `Dispatcher`, and `DispatcherFactory`;
-- `dispatcher/host` adapts handler code into a dispatcher;
 - `dispatcher/replay` provides a replay dispatcher decorator;
 - `dispatcher/replay/tape/journaled` provides a journal-backed replay tape;
 - `session_store_memory` provides an in-memory `SessionStore`.
@@ -231,14 +230,12 @@ session:
 type dispatcherFactory struct{}
 
 func (dispatcherFactory) NewDispatcher(context.Context, Run) (dispatcher.Dispatcher[Run], error) {
-	return &host.Dispatcher[Run]{
-		Handlers: handlers{},
-	}, nil
+	return runDispatcher{}, nil
 }
 
-type handlers struct{}
+type runDispatcher struct{}
 
-func (handlers) Execute(ctx context.Context, run Run, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (runDispatcher) Dispatch(ctx context.Context, run Run, call dispatcher.Call) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case "echo":
 		return dispatcher.Result(call.Args), nil

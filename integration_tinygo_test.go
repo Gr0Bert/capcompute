@@ -3,7 +3,6 @@ package capcompute_test
 import (
 	"capcompute"
 	"capcompute/dispatcher"
-	dispatcherhost "capcompute/dispatcher/host"
 	"capcompute/session_store_memory"
 	"context"
 	"encoding/json"
@@ -29,14 +28,12 @@ func (k integrationSessionKey) SessionKey() string {
 type integrationDispatcherFactory struct{}
 
 func (integrationDispatcherFactory) NewDispatcher(context.Context, integrationSessionKey) (dispatcher.Dispatcher[integrationSessionKey], error) {
-	return &dispatcherhost.Dispatcher[integrationSessionKey]{
-		Handlers: integrationHandlers{},
-	}, nil
+	return integrationDispatcher{}, nil
 }
 
-type integrationHandlers struct{}
+type integrationDispatcher struct{}
 
-func (integrationHandlers) Execute(_ context.Context, _ integrationSessionKey, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (integrationDispatcher) Dispatch(_ context.Context, _ integrationSessionKey, call dispatcher.Call) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case "host.echo":
 		return dispatcher.Result(json.RawMessage(`{"echoed":true}`)), nil
