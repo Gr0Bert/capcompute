@@ -6,12 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	extism "github.com/extism/go-sdk"
 )
-
-const defaultEntrypoint = "run"
 
 var (
 	ErrCompiledPluginRequired = errors.New("compiled plugin is required")
@@ -51,9 +48,6 @@ type Session[K any] struct {
 	request    PlayRequest
 	plugin     *extism.Plugin
 	dispatcher dispatcher.Dispatcher[K]
-	yielded    *dispatcher.Call
-	err        error
-	active     bool
 }
 
 // SessionStore owns per-key sessions and their active/idle lifecycle.
@@ -64,81 +58,17 @@ type SessionStore[ID comparable, K SessionKey[ID]] interface {
 	ListSessions(ctx context.Context) (map[ID]*Session[K], error)
 }
 
-type memorySessionStore[ID comparable, K SessionKey[ID]] struct {
-	mu       sync.Mutex
-	sessions map[ID]*Session[K]
-}
-
-func newMemorySessionStore[ID comparable, K SessionKey[ID]]() *memorySessionStore[ID, K] {
-	return &memorySessionStore[ID, K]{sessions: make(map[ID]*Session[K])}
-}
-
-func (s *memorySessionStore[ID, K]) LoadSession(_ context.Context, sessionID ID) (*Session[K], error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	session, ok := s.sessions[sessionID]
-	if !ok {
-		return nil, ErrSessionRequired
-	}
-	return session, nil
-}
-
-func (s *memorySessionStore[ID, K]) SaveSession(_ context.Context, sessionID ID, session *Session[K]) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.sessions == nil {
-		s.sessions = make(map[ID]*Session[K])
-	}
-	s.sessions[sessionID] = session
-	return nil
-}
-
-func (s *memorySessionStore[ID, K]) DeleteSession(_ context.Context, sessionID ID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	delete(s.sessions, sessionID)
-	return nil
-}
-
-func (s *memorySessionStore[ID, K]) ListSessions(context.Context) (map[ID]*Session[K], error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sessions := make(map[ID]*Session[K], len(s.sessions))
-	for sessionID, session := range s.sessions {
-		sessions[sessionID] = session
-	}
-	return sessions, nil
-}
-
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
 func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Context, config Config[ID, K]) (*ComputeCompiledPlugin[ID, K], error) {
-	if config.Dispatchers == nil {
-		return nil, ErrDispatcherRequired
-	}
-
-	entrypoint := config.Entrypoint
-	if entrypoint == "" {
-		entrypoint = defaultEntrypoint
-	}
-
-	sessionStore := config.SessionStore
-	if sessionStore == nil {
-		sessionStore = newMemorySessionStore[ID, K]()
-	}
-
 	compute := &ComputeCompiledPlugin[ID, K]{
 		dispatchers:    config.Dispatchers,
-		sessionStore:   sessionStore,
+		sessionStore:   config.SessionStore,
 		instanceConfig: config.InstanceConfig,
-		entrypoint:     entrypoint,
+		entrypoint:     config.Entrypoint,
 	}
 
 	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
-		compute.hostFunction(),
+		hostFunction(compute.sessionStore),
 	})
 	if err != nil {
 		return nil, err
@@ -378,10 +308,10 @@ func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, 
 	}
 }
 
-func (s *Session[K]) resetPlay() {
-	s.dispatcher = nil
-	s.yielded = nil
-	s.err = nil
+func (session *Session[K]) resetPlay() {
+	session.dispatcher = nil
+	session.yielded = nil
+	session.err = nil
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) playEntrypoint(req PlayRequest) string {
@@ -394,23 +324,18 @@ func (c *ComputeCompiledPlugin[ID, K]) playEntrypoint(req PlayRequest) string {
 	return defaultEntrypoint
 }
 
-func (s *Session[K]) startPlay(dispatch dispatcher.Dispatcher[K]) {
-	s.dispatcher = dispatch
-	s.yielded = nil
-	s.err = nil
+func (session *Session[K]) startPlay(dispatch dispatcher.Dispatcher[K]) {
+	session.dispatcher = dispatch
+	session.yielded = nil
+	session.err = nil
 }
 
-func (s *Session[K]) finishPlay(keepDispatcher bool) {
+func (session *Session[K]) finishPlay(keepDispatcher bool) {
 	if !keepDispatcher {
-		s.dispatcher = nil
-		s.yielded = nil
+		session.dispatcher = nil
+		session.yielded = nil
 	}
-	s.err = nil
-}
-
-func (s *Session[K]) recordYield(call dispatcher.Call) {
-	copied := call.Copy()
-	s.yielded = &copied
+	session.err = nil
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) saveSession(ctx context.Context, sessionKey ID) error {
