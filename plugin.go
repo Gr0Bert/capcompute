@@ -12,7 +12,6 @@ import (
 var (
 	ErrDispatcherRequired   = errors.New("dispatcher is required")
 	ErrSessionRequired      = errors.New("session is required")
-	ErrSessionActive        = errors.New("session is already playing")
 	ErrSessionStoreRequired = errors.New("session store is required")
 )
 
@@ -53,12 +52,10 @@ func (session *Session[K]) Close(ctx context.Context) error {
 	return session.plugin.Close(ctx)
 }
 
-// SessionStore owns per-key sessions and their active/idle lifecycle.
+// SessionStore owns per-key sessions.
 type SessionStore[ID comparable, K SessionKey[ID]] interface {
 	LoadSession(ctx context.Context, sessionID ID) (*Session[K], error)
 	SaveSession(ctx context.Context, sessionID ID, session *Session[K]) error
-	BeginSession(ctx context.Context, sessionID ID) error
-	EndSession(ctx context.Context, sessionID ID) error
 }
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
@@ -130,7 +127,7 @@ func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, reques
 }
 
 // Play starts one exclusive guest invocation for key in its own goroutine.
-func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session Session[K]) (<-chan PlayResult[K], error) {
+func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session *Session[K]) (<-chan PlayResult[K], error) {
 	sessionKey := session.GuestData.SessionKey()
 	results := make(chan PlayResult[K], 1)
 	go func() {
@@ -141,6 +138,7 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session Session
 		exit, output, err := session.plugin.CallWithContext(callCtx, session.Entrypoint, session.Input)
 		if err != nil {
 			results <- PlayResult[K]{Status: PlayFailed, Exit: exit, Err: err}
+			return
 		}
 		status := playStatus(output)
 		if status == PlayYielded {
@@ -149,12 +147,14 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session Session
 				Output: append(json.RawMessage(nil), output...),
 				Exit:   exit,
 			}
+			return
 		}
 		results <- PlayResult[K]{
 			Status: PlayCompleted,
 			Output: append(json.RawMessage(nil), output...),
 			Exit:   exit,
 		}
+		return
 	}()
 	return results, nil
 }

@@ -34,16 +34,14 @@ func (f testDispatcherFactory) NewDispatcher(context.Context, testSessionKey) (d
 
 type testSessionStore struct {
 	sessions map[string]*Session[testSessionKey]
-	active   map[string]struct{}
 	saveErr  error
-	endErr   error
 }
 
 func newTestSessionStore(sessions map[string]*Session[testSessionKey]) *testSessionStore {
 	if sessions == nil {
 		sessions = make(map[string]*Session[testSessionKey])
 	}
-	return &testSessionStore{sessions: sessions, active: make(map[string]struct{})}
+	return &testSessionStore{sessions: sessions}
 }
 
 func (s *testSessionStore) LoadSession(_ context.Context, sessionID string) (*Session[testSessionKey], error) {
@@ -60,51 +58,6 @@ func (s *testSessionStore) SaveSession(_ context.Context, sessionID string, sess
 	}
 	s.sessions[sessionID] = session
 	return nil
-}
-
-func (s *testSessionStore) DeleteSession(_ context.Context, sessionID string) error {
-	delete(s.sessions, sessionID)
-	delete(s.active, sessionID)
-	return nil
-}
-
-func (s *testSessionStore) ListSessions(context.Context) (map[string]*Session[testSessionKey], error) {
-	sessions := make(map[string]*Session[testSessionKey], len(s.sessions))
-	for sessionID, session := range s.sessions {
-		sessions[sessionID] = session
-	}
-	return sessions, nil
-}
-
-func (s *testSessionStore) BeginSession(_ context.Context, sessionID string) error {
-	if _, ok := s.sessions[sessionID]; !ok {
-		return ErrSessionRequired
-	}
-	if _, ok := s.active[sessionID]; ok {
-		return ErrSessionActive
-	}
-	s.active[sessionID] = struct{}{}
-	return nil
-}
-
-func (s *testSessionStore) EndSession(_ context.Context, sessionID string) error {
-	if s.endErr != nil {
-		return s.endErr
-	}
-	delete(s.active, sessionID)
-	return nil
-}
-
-func (s *testSessionStore) IsSessionActive(_ context.Context, sessionID string) (bool, error) {
-	if _, ok := s.sessions[sessionID]; !ok {
-		return false, ErrSessionRequired
-	}
-	_, ok := s.active[sessionID]
-	return ok, nil
-}
-
-func (s *testSessionStore) markActive(sessionID string) {
-	s.active[sessionID] = struct{}{}
 }
 
 func TestNewComputeCompiledPluginRequiresDispatcherFactory(t *testing.T) {
