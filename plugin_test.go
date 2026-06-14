@@ -36,15 +36,16 @@ func (f testDispatcherFactory) NewDispatcher(context.Context, testSessionKey) (d
 
 type testSessionStore struct {
 	sessions map[string]*Session[testSessionKey]
-	deleted  []string
+	active   map[string]struct{}
 	saveErr  error
+	endErr   error
 }
 
 func newTestSessionStore(sessions map[string]*Session[testSessionKey]) *testSessionStore {
 	if sessions == nil {
 		sessions = make(map[string]*Session[testSessionKey])
 	}
-	return &testSessionStore{sessions: sessions}
+	return &testSessionStore{sessions: sessions, active: make(map[string]struct{})}
 }
 
 func (s *testSessionStore) LoadSession(_ context.Context, sessionID string) (*Session[testSessionKey], error) {
@@ -65,7 +66,7 @@ func (s *testSessionStore) SaveSession(_ context.Context, sessionID string, sess
 
 func (s *testSessionStore) DeleteSession(_ context.Context, sessionID string) error {
 	delete(s.sessions, sessionID)
-	s.deleted = append(s.deleted, sessionID)
+	delete(s.active, sessionID)
 	return nil
 }
 
@@ -77,27 +78,61 @@ func (s *testSessionStore) ListSessions(context.Context) (map[string]*Session[te
 	return sessions, nil
 }
 
-func TestPlayEntrypointUsesRequestThenConfigThenDefault(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{entrypoint: "configured"}
-
-	if got := compute.playEntrypoint(PlayRequest{Entrypoint: "request"}); got != "request" {
-		t.Fatalf("entrypoint = %q, want request", got)
+func (s *testSessionStore) BeginSession(_ context.Context, sessionID string) error {
+	if _, ok := s.sessions[sessionID]; !ok {
+		return ErrSessionRequired
 	}
-	if got := compute.playEntrypoint(PlayRequest{}); got != "configured" {
-		t.Fatalf("entrypoint = %q, want configured", got)
+	if _, ok := s.active[sessionID]; ok {
+		return ErrSessionActive
 	}
+	s.active[sessionID] = struct{}{}
+	return nil
+}
 
-	compute.entrypoint = ""
-	if got := compute.playEntrypoint(PlayRequest{}); got != defaultEntrypoint {
-		t.Fatalf("entrypoint = %q, want %q", got, defaultEntrypoint)
+func (s *testSessionStore) EndSession(_ context.Context, sessionID string) error {
+	if s.endErr != nil {
+		return s.endErr
+	}
+	delete(s.active, sessionID)
+	return nil
+}
+
+func (s *testSessionStore) IsSessionActive(_ context.Context, sessionID string) (bool, error) {
+	if _, ok := s.sessions[sessionID]; !ok {
+		return false, ErrSessionRequired
+	}
+	_, ok := s.active[sessionID]
+	return ok, nil
+}
+
+func (s *testSessionStore) markActive(sessionID string) {
+	s.active[sessionID] = struct{}{}
+}
+
+func TestNewComputeCompiledPluginRequiresDispatcherFactory(t *testing.T) {
+	_, err := NewComputeCompiledPlugin[string, testSessionKey](context.Background(), Config[string, testSessionKey]{
+		SessionStore: newTestSessionStore(nil),
+	})
+	if err != ErrDispatcherRequired {
+		t.Fatalf("error = %v, want ErrDispatcherRequired", err)
+	}
+}
+
+func TestNewComputeCompiledPluginRequiresSessionStore(t *testing.T) {
+	_, err := NewComputeCompiledPlugin[string, testSessionKey](context.Background(), Config[string, testSessionKey]{
+		Dispatchers: testDispatcherFactory{},
+	})
+	if err != ErrSessionStoreRequired {
+		t.Fatalf("error = %v, want ErrSessionStoreRequired", err)
 	}
 }
 
 func TestBeginPlayRejectsActiveSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
 	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
+		"run-1": {guestData: key},
 	})
+	store.markActive("run-1")
 	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	_, err := compute.beginPlay(context.Background(), "run-1", key, PlayRequest{})
@@ -106,16 +141,13 @@ func TestBeginPlayRejectsActiveSession(t *testing.T) {
 	}
 }
 
-func TestBeginPlayReusesSessionAndResetsPlayState(t *testing.T) {
-	staleErr := errors.New("stale")
+func TestBeginPlayReusesSessionAndResetsDispatcher(t *testing.T) {
 	oldKey := testSessionKey{id: "run-1", value: "old"}
 	newKey := testSessionKey{id: "run-1", value: "new"}
-	request := PlayRequest{Input: json.RawMessage(`{"x":1}`), Entrypoint: "run"}
+	request := PlayRequest{Input: json.RawMessage(`{"x":1}`), Entrypoint: "custom"}
 	existing := &Session[testSessionKey]{
 		guestData:  oldKey,
 		dispatcher: testDispatcher{},
-		yielded:    &dispatcher.Call{Name: "step.one"},
-		err:        staleErr,
 	}
 	store := newTestSessionStore(map[string]*Session[testSessionKey]{"run-1": existing})
 	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
@@ -130,19 +162,13 @@ func TestBeginPlayReusesSessionAndResetsPlayState(t *testing.T) {
 	if session.guestData != newKey {
 		t.Fatalf("guest data = %#v, want %#v", session.guestData, newKey)
 	}
-	if string(session.request.Input) != `{"x":1}` || session.request.Entrypoint != "run" {
+	if string(session.request.Input) != `{"x":1}` || session.request.Entrypoint != "custom" {
 		t.Fatalf("request = %#v", session.request)
 	}
 	if session.dispatcher != nil {
 		t.Fatal("dispatcher was not reset")
 	}
-	if session.yielded != nil {
-		t.Fatal("yielded call was not reset")
-	}
-	if session.err != nil {
-		t.Fatalf("err = %v, want nil", session.err)
-	}
-	if !existing.active {
+	if _, ok := store.active["run-1"]; !ok {
 		t.Fatal("session was not marked active")
 	}
 }
@@ -165,262 +191,40 @@ func TestPlayReleasesActiveSessionWhenDispatcherFactoryFails(t *testing.T) {
 	if results != nil {
 		t.Fatal("results should be nil when Play fails before starting")
 	}
-	if store.sessions["run-1"].active {
+	if _, ok := store.active["run-1"]; ok {
 		t.Fatal("active session was not released")
 	}
 }
 
-func TestBeginReplayRequiresExistingSession(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: newTestSessionStore(nil)}
-
-	_, _, err := compute.beginReplay(context.Background(), "run-1")
-	if err != ErrSessionRequired {
-		t.Fatalf("error = %v, want ErrSessionRequired", err)
-	}
-}
-
-func TestBeginReplayRejectsActiveSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {
-			guestData:  key,
-			dispatcher: testDispatcher{},
-			active:     true,
-		},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	_, _, err := compute.beginReplay(context.Background(), "run-1")
-	if err != ErrSessionActive {
-		t.Fatalf("error = %v, want ErrSessionActive", err)
-	}
-}
-
-func TestBeginReplayRequiresExistingDispatcher(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	_, _, err := compute.beginReplay(context.Background(), "run-1")
-	if err != ErrDispatcherRequired {
-		t.Fatalf("error = %v, want ErrDispatcherRequired", err)
-	}
-}
-
-func TestBeginReplayUsesExistingDispatcher(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	existing := testDispatcher{}
-	request := PlayRequest{Input: json.RawMessage(`{"x":1}`), Entrypoint: "run"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {
-			guestData:  key,
-			request:    request,
-			dispatcher: existing,
-			yielded:    &dispatcher.Call{Name: "step.one"},
-		},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	session, replayDispatcher, err := compute.beginReplay(context.Background(), "run-1")
-	if err != nil {
-		t.Fatalf("begin replay: %v", err)
-	}
-	if !session.active {
-		t.Fatal("session was not marked active")
-	}
-	if replayDispatcher == nil {
-		t.Fatal("dispatcher is nil")
-	}
-	if string(session.request.Input) != `{"x":1}` || session.request.Entrypoint != "run" {
-		t.Fatalf("request = %#v", session.request)
-	}
-}
-
-func TestReplayRequiresExistingSession(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: newTestSessionStore(nil)}
-
-	results, err := compute.Replay(context.Background(), "run-1")
-	if err != ErrSessionRequired {
-		t.Fatalf("error = %v, want ErrSessionRequired", err)
-	}
-	if results != nil {
-		t.Fatal("results should be nil when Replay fails before starting")
-	}
-}
-
-func TestSessionRecordsYieldedCallCopy(t *testing.T) {
-	session := &Session[testSessionKey]{}
-	call := dispatcher.Call{Name: "step.one", Args: []byte(`{"x":1}`)}
-
-	session.recordYield(call)
-	call.Args[0] = '!'
-
-	if session.yielded == nil {
-		t.Fatal("yielded call was not recorded")
-	}
-	if string(session.yielded.Args) != `{"x":1}` {
-		t.Fatalf("yielded args = %s", session.yielded.Args)
-	}
-}
-
-func TestSessionKeepsDispatcherAndYieldedCallAfterYield(t *testing.T) {
+func TestSessionKeepsDispatcherAfterYield(t *testing.T) {
 	session := &Session[testSessionKey]{}
 	session.startPlay(testDispatcher{})
-	session.recordYield(dispatcher.Call{Name: "step.one"})
 	session.finishPlay(true)
 
 	if session.dispatcher == nil {
 		t.Fatal("dispatcher should be kept after yield")
-	}
-	if session.yielded == nil || session.yielded.Name != "step.one" {
-		t.Fatalf("yielded = %#v", session.yielded)
 	}
 
 	session.finishPlay(false)
 	if session.dispatcher != nil {
 		t.Fatal("dispatcher should be cleared after completion")
 	}
-	if session.yielded != nil {
-		t.Fatal("yielded should be cleared after completion")
+}
+
+func TestPlayStatusReadsYieldedOutput(t *testing.T) {
+	if got := playStatus([]byte(`{"status":"yielded"}`)); got != PlayYielded {
+		t.Fatalf("status = %s, want %s", got, PlayYielded)
 	}
 }
 
-func TestFinishPlayResultKeepsYieldedSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
-		Key:    key,
-		Status: PlayYielded,
-	})
-	if err != nil {
-		t.Fatalf("finish play: %v", err)
-	}
-	if store.sessions["run-1"].active {
-		t.Fatal("yielded session should not remain active")
-	}
-	if _, ok := store.sessions["run-1"]; !ok {
-		t.Fatal("yielded session should be retained")
-	}
-}
-
-func TestFinishPlayResultReleasesActiveWhenSaveFails(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	saveErr := errors.New("save failed")
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	store.saveErr = saveErr
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
-		Key:    key,
-		Status: PlayYielded,
-	})
-	if !errors.Is(err, saveErr) {
-		t.Fatalf("error = %v, want save error", err)
-	}
-	if store.sessions["run-1"].active {
-		t.Fatal("active session should be released after save failure")
-	}
-	if _, ok := store.sessions["run-1"]; !ok {
-		t.Fatal("session should be retained after save failure")
-	}
-}
-
-func TestFinishPlayResultRemovesFailedSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
-		Key:    key,
-		Status: PlayFailed,
-		Err:    errors.New("guest failed"),
-	})
-	if err != nil {
-		t.Fatalf("finish play: %v", err)
-	}
-	if _, ok := store.sessions["run-1"]; ok {
-		t.Fatal("failed session should be removed")
-	}
-}
-
-func TestFinishPlayResultRemovesCompletedSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
-		Key:    key,
-		Status: PlayCompleted,
-	})
-	if err != nil {
-		t.Fatalf("finish play: %v", err)
-	}
-	if _, ok := store.sessions["run-1"]; ok {
-		t.Fatal("completed session should be removed")
-	}
-}
-
-func TestFinishPlayResultDeletesCompletedSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
-		Key:    key,
-		Status: PlayCompleted,
-	})
-	if err != nil {
-		t.Fatalf("finish play: %v", err)
-	}
-	if len(store.deleted) != 1 || store.deleted[0] != "run-1" {
-		t.Fatalf("deleted = %#v", store.deleted)
-	}
-}
-
-func TestCloseRejectsActiveSession(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key, active: true},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	err := compute.Close(context.Background())
-	if err != ErrSessionActive {
-		t.Fatalf("error = %v, want ErrSessionActive", err)
-	}
-	if _, ok := store.sessions["run-1"]; !ok {
-		t.Fatal("active close should not clear sessions")
-	}
-	if !store.sessions["run-1"].active {
-		t.Fatal("active close should not release session")
-	}
-}
-
-func TestCloseClearsIdleSessions(t *testing.T) {
-	key := testSessionKey{id: "run-1"}
-	store := newTestSessionStore(map[string]*Session[testSessionKey]{
-		"run-1": {guestData: key},
-	})
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
-
-	if err := compute.Close(context.Background()); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	if len(store.sessions) != 0 {
-		t.Fatalf("sessions = %d, want 0", len(store.sessions))
+func TestPlayStatusDefaultsToCompleted(t *testing.T) {
+	for _, output := range [][]byte{
+		[]byte(`{"status":"completed"}`),
+		[]byte(`{"answer":"done"}`),
+		[]byte(`not json`),
+	} {
+		if got := playStatus(output); got != PlayCompleted {
+			t.Fatalf("status = %s for %s, want %s", got, output, PlayCompleted)
+		}
 	}
 }
