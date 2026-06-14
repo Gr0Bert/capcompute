@@ -20,6 +20,8 @@ Root `capcompute` owns:
 - `Config`
 - `Session`
 - `SessionKey`
+- `SessionStore`
+- `SessionRecord`
 - `PlayRequest`
 - `PlayResult`
 - session lifecycle
@@ -38,7 +40,7 @@ Current boundaries:
 
 ```text
 capcompute
-  compiled plugin, sessions, Play/Replay lifecycle
+  compiled plugin, sessions, SessionStore, Play/Replay lifecycle
 
 dispatcher
   Dispatcher interface
@@ -90,6 +92,8 @@ If an import cycle appears, fix ownership. Do not add glue packages to hide it.
 ## Session Model
 
 `ComputeCompiledPlugin` owns the session map and active-session exclusivity.
+`SessionStore` is the root-owned persistence boundary for yielded session
+records.
 
 `Session` owns:
 
@@ -103,6 +107,12 @@ Context passed into Extism host callbacks carries only the session id.
 
 Yielded sessions are retained for replay.
 Completed or failed sessions are finalized and removed.
+
+If a `SessionStore` is configured:
+
+- yielded sessions are saved;
+- completed or failed sessions are deleted;
+- concrete persistent implementations stay outside the root package.
 
 ## Replay Model
 

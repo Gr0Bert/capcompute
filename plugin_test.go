@@ -34,6 +34,49 @@ func (f testDispatcherFactory) NewDispatcher(context.Context, testSessionKey) (d
 	return testDispatcher{}, nil
 }
 
+type testSessionStore struct {
+	sessions map[string]*Session[testSessionKey]
+	deleted  []string
+	saveErr  error
+}
+
+func newTestSessionStore(sessions map[string]*Session[testSessionKey]) *testSessionStore {
+	if sessions == nil {
+		sessions = make(map[string]*Session[testSessionKey])
+	}
+	return &testSessionStore{sessions: sessions}
+}
+
+func (s *testSessionStore) LoadSession(_ context.Context, sessionID string) (*Session[testSessionKey], error) {
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, ErrSessionRequired
+	}
+	return session, nil
+}
+
+func (s *testSessionStore) SaveSession(_ context.Context, sessionID string, session *Session[testSessionKey]) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.sessions[sessionID] = session
+	return nil
+}
+
+func (s *testSessionStore) DeleteSession(_ context.Context, sessionID string) error {
+	delete(s.sessions, sessionID)
+	s.deleted = append(s.deleted, sessionID)
+	return nil
+}
+
+func (s *testSessionStore) ListSessions(context.Context) (map[string]*Session[testSessionKey], error) {
+	sessions := make(map[string]*Session[testSessionKey], len(s.sessions))
+	for sessionID, session := range s.sessions {
+		sessions[sessionID] = session
+	}
+	return sessions, nil
+}
+
 func TestPlayEntrypointUsesRequestThenConfigThenDefault(t *testing.T) {
 	compute := &ComputeCompiledPlugin[string, testSessionKey]{entrypoint: "configured"}
 
@@ -52,12 +95,10 @@ func TestPlayEntrypointUsesRequestThenConfigThenDefault(t *testing.T) {
 
 func TestBeginPlayRejectsActiveSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	_, err := compute.beginPlay(context.Background(), "run-1", key, PlayRequest{})
 	if err != ErrSessionActive {
@@ -76,12 +117,8 @@ func TestBeginPlayReusesSessionAndResetsPlayState(t *testing.T) {
 		yielded:    &dispatcher.Call{Name: "step.one"},
 		err:        staleErr,
 	}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": existing,
-		},
-		active: map[string]struct{}{},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{"run-1": existing})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	session, err := compute.beginPlay(context.Background(), "run-1", newKey, request)
 	if err != nil {
@@ -105,7 +142,7 @@ func TestBeginPlayReusesSessionAndResetsPlayState(t *testing.T) {
 	if session.err != nil {
 		t.Fatalf("err = %v, want nil", session.err)
 	}
-	if _, ok := compute.active["run-1"]; !ok {
+	if !existing.active {
 		t.Fatal("session was not marked active")
 	}
 }
@@ -113,12 +150,12 @@ func TestBeginPlayReusesSessionAndResetsPlayState(t *testing.T) {
 func TestPlayReleasesActiveSessionWhenDispatcherFactoryFails(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
 	dispatcherErr := errors.New("dispatcher failed")
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key},
+	})
 	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		dispatchers: testDispatcherFactory{err: dispatcherErr},
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{},
+		dispatchers:  testDispatcherFactory{err: dispatcherErr},
+		sessionStore: store,
 	}
 
 	results, err := compute.Play(context.Background(), key, PlayRequest{})
@@ -128,18 +165,15 @@ func TestPlayReleasesActiveSessionWhenDispatcherFactoryFails(t *testing.T) {
 	if results != nil {
 		t.Fatal("results should be nil when Play fails before starting")
 	}
-	if _, ok := compute.active["run-1"]; ok {
+	if store.sessions["run-1"].active {
 		t.Fatal("active session was not released")
 	}
 }
 
 func TestBeginReplayRequiresExistingSession(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{},
-		active:   map[string]struct{}{},
-	}
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: newTestSessionStore(nil)}
 
-	_, _, err := compute.beginReplay("run-1")
+	_, _, err := compute.beginReplay(context.Background(), "run-1")
 	if err != ErrSessionRequired {
 		t.Fatalf("error = %v, want ErrSessionRequired", err)
 	}
@@ -147,17 +181,16 @@ func TestBeginReplayRequiresExistingSession(t *testing.T) {
 
 func TestBeginReplayRejectsActiveSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {
-				guestData:  key,
-				dispatcher: testDispatcher{},
-			},
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {
+			guestData:  key,
+			dispatcher: testDispatcher{},
+			active:     true,
 		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
-	_, _, err := compute.beginReplay("run-1")
+	_, _, err := compute.beginReplay(context.Background(), "run-1")
 	if err != ErrSessionActive {
 		t.Fatalf("error = %v, want ErrSessionActive", err)
 	}
@@ -165,16 +198,12 @@ func TestBeginReplayRejectsActiveSession(t *testing.T) {
 
 func TestBeginReplayRequiresExistingDispatcher(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {
-				guestData: key,
-			},
-		},
-		active: map[string]struct{}{},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
-	_, _, err := compute.beginReplay("run-1")
+	_, _, err := compute.beginReplay(context.Background(), "run-1")
 	if err != ErrDispatcherRequired {
 		t.Fatalf("error = %v, want ErrDispatcherRequired", err)
 	}
@@ -184,23 +213,21 @@ func TestBeginReplayUsesExistingDispatcher(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
 	existing := testDispatcher{}
 	request := PlayRequest{Input: json.RawMessage(`{"x":1}`), Entrypoint: "run"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {
-				guestData:  key,
-				request:    request,
-				dispatcher: existing,
-				yielded:    &dispatcher.Call{Name: "step.one"},
-			},
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {
+			guestData:  key,
+			request:    request,
+			dispatcher: existing,
+			yielded:    &dispatcher.Call{Name: "step.one"},
 		},
-		active: map[string]struct{}{},
-	}
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
-	session, replayDispatcher, err := compute.beginReplay("run-1")
+	session, replayDispatcher, err := compute.beginReplay(context.Background(), "run-1")
 	if err != nil {
 		t.Fatalf("begin replay: %v", err)
 	}
-	if _, ok := compute.active["run-1"]; !ok {
+	if !session.active {
 		t.Fatal("session was not marked active")
 	}
 	if replayDispatcher == nil {
@@ -212,10 +239,7 @@ func TestBeginReplayUsesExistingDispatcher(t *testing.T) {
 }
 
 func TestReplayRequiresExistingSession(t *testing.T) {
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{},
-		active:   map[string]struct{}{},
-	}
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: newTestSessionStore(nil)}
 
 	results, err := compute.Replay(context.Background(), "run-1")
 	if err != ErrSessionRequired {
@@ -265,12 +289,10 @@ func TestSessionKeepsDispatcherAndYieldedCallAfterYield(t *testing.T) {
 
 func TestFinishPlayResultKeepsYieldedSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
 		Key:    key,
@@ -279,22 +301,44 @@ func TestFinishPlayResultKeepsYieldedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finish play: %v", err)
 	}
-	if _, ok := compute.active["run-1"]; ok {
+	if store.sessions["run-1"].active {
 		t.Fatal("yielded session should not remain active")
 	}
-	if _, ok := compute.sessions["run-1"]; !ok {
+	if _, ok := store.sessions["run-1"]; !ok {
 		t.Fatal("yielded session should be retained")
+	}
+}
+
+func TestFinishPlayResultReleasesActiveWhenSaveFails(t *testing.T) {
+	key := testSessionKey{id: "run-1"}
+	saveErr := errors.New("save failed")
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	store.saveErr = saveErr
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
+
+	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
+		Key:    key,
+		Status: PlayYielded,
+	})
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("error = %v, want save error", err)
+	}
+	if store.sessions["run-1"].active {
+		t.Fatal("active session should be released after save failure")
+	}
+	if _, ok := store.sessions["run-1"]; !ok {
+		t.Fatal("session should be retained after save failure")
 	}
 }
 
 func TestFinishPlayResultRemovesFailedSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
 		Key:    key,
@@ -304,22 +348,17 @@ func TestFinishPlayResultRemovesFailedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finish play: %v", err)
 	}
-	if _, ok := compute.active["run-1"]; ok {
-		t.Fatal("failed session should not remain active")
-	}
-	if _, ok := compute.sessions["run-1"]; ok {
+	if _, ok := store.sessions["run-1"]; ok {
 		t.Fatal("failed session should be removed")
 	}
 }
 
 func TestFinishPlayResultRemovesCompletedSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
 		Key:    key,
@@ -328,48 +367,60 @@ func TestFinishPlayResultRemovesCompletedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finish play: %v", err)
 	}
-	if _, ok := compute.active["run-1"]; ok {
-		t.Fatal("completed session should not remain active")
-	}
-	if _, ok := compute.sessions["run-1"]; ok {
+	if _, ok := store.sessions["run-1"]; ok {
 		t.Fatal("completed session should be removed")
+	}
+}
+
+func TestFinishPlayResultDeletesCompletedSession(t *testing.T) {
+	key := testSessionKey{id: "run-1"}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
+
+	err := compute.finishPlayResult(context.Background(), "run-1", PlayResult[testSessionKey]{
+		Key:    key,
+		Status: PlayCompleted,
+	})
+	if err != nil {
+		t.Fatalf("finish play: %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "run-1" {
+		t.Fatalf("deleted = %#v", store.deleted)
 	}
 }
 
 func TestCloseRejectsActiveSession(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{"run-1": {}},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key, active: true},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	err := compute.Close(context.Background())
 	if err != ErrSessionActive {
 		t.Fatalf("error = %v, want ErrSessionActive", err)
 	}
-	if _, ok := compute.sessions["run-1"]; !ok {
+	if _, ok := store.sessions["run-1"]; !ok {
 		t.Fatal("active close should not clear sessions")
+	}
+	if !store.sessions["run-1"].active {
+		t.Fatal("active close should not release session")
 	}
 }
 
 func TestCloseClearsIdleSessions(t *testing.T) {
 	key := testSessionKey{id: "run-1"}
-	compute := &ComputeCompiledPlugin[string, testSessionKey]{
-		sessions: map[string]*Session[testSessionKey]{
-			"run-1": {guestData: key},
-		},
-		active: map[string]struct{}{},
-	}
+	store := newTestSessionStore(map[string]*Session[testSessionKey]{
+		"run-1": {guestData: key},
+	})
+	compute := &ComputeCompiledPlugin[string, testSessionKey]{sessionStore: store}
 
 	if err := compute.Close(context.Background()); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if len(compute.sessions) != 0 {
-		t.Fatalf("sessions = %d, want 0", len(compute.sessions))
-	}
-	if len(compute.active) != 0 {
-		t.Fatalf("active = %d, want 0", len(compute.active))
+	if len(store.sessions) != 0 {
+		t.Fatalf("sessions = %d, want 0", len(store.sessions))
 	}
 }

@@ -39,7 +39,7 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 			Message: "session key missing from context",
 		})
 	}
-	session, ok := c.session(sessionKey)
+	session, ok := c.session(ctx, sessionKey)
 	if !ok {
 		return writeHostResponse(plugin, hostResponse{
 			Status:  dispatcher.OutcomeFailed,
@@ -94,12 +94,9 @@ func (c *ComputeCompiledPlugin[ID, K]) dispatchHostCall(ctx context.Context, plu
 	})
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) session(key ID) (*Session[K], bool) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	session, ok := c.sessions[key]
-	return session, ok
+func (c *ComputeCompiledPlugin[ID, K]) session(ctx context.Context, key ID) (*Session[K], bool) {
+	session, err := c.sessionStore.LoadSession(ctx, key)
+	return session, err == nil
 }
 
 func writeHostResponse(plugin *extism.CurrentPlugin, response hostResponse) uint64 {

@@ -5,12 +5,20 @@ import (
 	"capcompute/dispatcher/replay"
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 
 	extism "github.com/extism/go-sdk"
 )
 
 const defaultEntrypoint = "run"
+
+var (
+	ErrCompiledPluginRequired = errors.New("compiled plugin is required")
+	ErrDispatcherRequired     = errors.New("dispatcher is required")
+	ErrSessionRequired        = errors.New("session is required")
+	ErrSessionActive          = errors.New("session is already playing")
+)
 
 // SessionKey lets user-owned run data expose the stable identity used for session maps.
 type SessionKey[ID comparable] interface {
@@ -24,18 +32,16 @@ type Config[ID comparable, K SessionKey[ID]] struct {
 	InstanceConfig extism.PluginInstanceConfig
 	Entrypoint     string
 	Dispatchers    dispatcher.DispatcherFactory[K]
+	SessionStore   SessionStore[ID, K]
 }
 
 // ComputeCompiledPlugin owns one compiled module, dispatcher factory, and per-key sessions.
 type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
 	dispatchers    dispatcher.DispatcherFactory[K]
+	sessionStore   SessionStore[ID, K]
 	instanceConfig extism.PluginInstanceConfig
 	entrypoint     string
-
-	sessionsMu sync.Mutex
-	sessions   map[ID]*Session[K]
-	active     map[ID]struct{}
 }
 
 // Session owns the reusable Extism plugin instance for one key.
@@ -47,6 +53,65 @@ type Session[K any] struct {
 	dispatcher dispatcher.Dispatcher[K]
 	yielded    *dispatcher.Call
 	err        error
+	active     bool
+}
+
+// SessionStore owns per-key sessions and their active/idle lifecycle.
+type SessionStore[ID comparable, K SessionKey[ID]] interface {
+	LoadSession(ctx context.Context, sessionID ID) (*Session[K], error)
+	SaveSession(ctx context.Context, sessionID ID, session *Session[K]) error
+	DeleteSession(ctx context.Context, sessionID ID) error
+	ListSessions(ctx context.Context) (map[ID]*Session[K], error)
+}
+
+type memorySessionStore[ID comparable, K SessionKey[ID]] struct {
+	mu       sync.Mutex
+	sessions map[ID]*Session[K]
+}
+
+func newMemorySessionStore[ID comparable, K SessionKey[ID]]() *memorySessionStore[ID, K] {
+	return &memorySessionStore[ID, K]{sessions: make(map[ID]*Session[K])}
+}
+
+func (s *memorySessionStore[ID, K]) LoadSession(_ context.Context, sessionID ID) (*Session[K], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, ErrSessionRequired
+	}
+	return session, nil
+}
+
+func (s *memorySessionStore[ID, K]) SaveSession(_ context.Context, sessionID ID, session *Session[K]) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sessions == nil {
+		s.sessions = make(map[ID]*Session[K])
+	}
+	s.sessions[sessionID] = session
+	return nil
+}
+
+func (s *memorySessionStore[ID, K]) DeleteSession(_ context.Context, sessionID ID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.sessions, sessionID)
+	return nil
+}
+
+func (s *memorySessionStore[ID, K]) ListSessions(context.Context) (map[ID]*Session[K], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions := make(map[ID]*Session[K], len(s.sessions))
+	for sessionID, session := range s.sessions {
+		sessions[sessionID] = session
+	}
+	return sessions, nil
 }
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
@@ -60,12 +125,16 @@ func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Conte
 		entrypoint = defaultEntrypoint
 	}
 
+	sessionStore := config.SessionStore
+	if sessionStore == nil {
+		sessionStore = newMemorySessionStore[ID, K]()
+	}
+
 	compute := &ComputeCompiledPlugin[ID, K]{
 		dispatchers:    config.Dispatchers,
+		sessionStore:   sessionStore,
 		instanceConfig: config.InstanceConfig,
 		entrypoint:     entrypoint,
-		sessions:       make(map[ID]*Session[K]),
-		active:         make(map[ID]struct{}),
 	}
 
 	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
@@ -112,7 +181,7 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, re
 	}
 	dispatcher, err := c.dispatchers.NewDispatcher(ctx, guestData)
 	if err != nil {
-		c.endPlay(sessionKey)
+		c.endPlay(ctx, sessionKey)
 		return nil, err
 	}
 
@@ -131,7 +200,7 @@ func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, guestData K, re
 
 // Replay starts another invocation for a yielded session using its existing dispatcher chain.
 func (c *ComputeCompiledPlugin[ID, K]) Replay(ctx context.Context, sessionKey ID) (<-chan PlayResult[K], error) {
-	session, dispatcher, err := c.beginReplay(sessionKey)
+	session, dispatcher, err := c.beginReplay(ctx, sessionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -151,17 +220,17 @@ func (c *ComputeCompiledPlugin[ID, K]) Replay(ctx context.Context, sessionKey ID
 
 // Close releases all session instances and the compiled plugin.
 func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
-	c.sessionsMu.Lock()
-	if len(c.active) > 0 {
-		c.sessionsMu.Unlock()
-		return ErrSessionActive
+	sessions, err := c.sessionStore.ListSessions(ctx)
+	if err != nil {
+		return err
 	}
-	sessions := c.sessions
+	for _, session := range sessions {
+		if session.active {
+			return ErrSessionActive
+		}
+	}
 	compiled := c.compiled
-	c.sessions = make(map[ID]*Session[K])
-	c.active = make(map[ID]struct{})
 	c.compiled = nil
-	c.sessionsMu.Unlock()
 
 	var closeErr error
 	for _, session := range sessions {
@@ -169,6 +238,11 @@ func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 			continue
 		}
 		if err := session.plugin.Close(ctx); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	for sessionID := range sessions {
+		if err := c.sessionStore.DeleteSession(ctx, sessionID); err != nil && closeErr == nil {
 			closeErr = err
 		}
 	}
@@ -181,83 +255,87 @@ func (c *ComputeCompiledPlugin[ID, K]) Close(ctx context.Context) error {
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) beginPlay(ctx context.Context, sessionKey ID, guestData K, req PlayRequest) (*Session[K], error) {
-	c.sessionsMu.Lock()
-	if _, ok := c.active[sessionKey]; ok {
-		c.sessionsMu.Unlock()
-		return nil, ErrSessionActive
-	}
-	if session, ok := c.sessions[sessionKey]; ok {
-		c.active[sessionKey] = struct{}{}
+	session, err := c.sessionStore.LoadSession(ctx, sessionKey)
+	if err == nil {
+		if session.active {
+			return nil, ErrSessionActive
+		}
+		session.active = true
 		session.guestData = guestData
 		session.request = req
 		session.resetPlay()
-		c.sessionsMu.Unlock()
 		return session, nil
 	}
+	if !errors.Is(err, ErrSessionRequired) {
+		return nil, err
+	}
 	if c.compiled == nil {
-		c.sessionsMu.Unlock()
 		return nil, ErrCompiledPluginRequired
 	}
-	c.active[sessionKey] = struct{}{}
-	c.sessionsMu.Unlock()
+	session = &Session[K]{guestData: guestData, request: req, active: true}
 
 	plugin, err := c.compiled.Instance(ctx, c.instanceConfig)
 	if err != nil {
-		c.endPlay(sessionKey)
 		return nil, err
 	}
-	session := &Session[K]{guestData: guestData, request: req, plugin: plugin}
-
-	c.sessionsMu.Lock()
-	c.sessions[sessionKey] = session
-	c.sessionsMu.Unlock()
+	session.plugin = plugin
+	if err := c.sessionStore.SaveSession(ctx, sessionKey, session); err != nil {
+		if closeErr := plugin.Close(ctx); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		return nil, err
+	}
 	return session, nil
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) beginReplay(sessionKey ID) (*Session[K], dispatcher.Dispatcher[K], error) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	if _, ok := c.active[sessionKey]; ok {
-		return nil, nil, ErrSessionActive
-	}
-	session, ok := c.sessions[sessionKey]
-	if !ok {
+func (c *ComputeCompiledPlugin[ID, K]) beginReplay(ctx context.Context, sessionKey ID) (*Session[K], dispatcher.Dispatcher[K], error) {
+	session, err := c.sessionStore.LoadSession(ctx, sessionKey)
+	if err != nil {
 		return nil, nil, ErrSessionRequired
+	}
+	if session.active {
+		return nil, nil, ErrSessionActive
 	}
 	if session.dispatcher == nil {
 		return nil, nil, ErrDispatcherRequired
 	}
-	c.active[sessionKey] = struct{}{}
+	session.active = true
 	return session, session.dispatcher, nil
 }
 
-func (c *ComputeCompiledPlugin[ID, K]) endPlay(sessionKey ID) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-
-	delete(c.active, sessionKey)
+func (c *ComputeCompiledPlugin[ID, K]) endPlay(ctx context.Context, sessionKey ID) {
+	session, err := c.sessionStore.LoadSession(ctx, sessionKey)
+	if err == nil {
+		session.active = false
+	}
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) finishPlayResult(ctx context.Context, sessionKey ID, result PlayResult[K]) error {
 	if result.Status == PlayYielded {
-		c.endPlay(sessionKey)
+		if err := c.saveSession(ctx, sessionKey); err != nil {
+			c.endPlay(ctx, sessionKey)
+			return err
+		}
+		c.endPlay(ctx, sessionKey)
 		return nil
 	}
 	return c.finishSession(ctx, sessionKey)
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) finishSession(ctx context.Context, sessionKey ID) error {
-	c.sessionsMu.Lock()
-	session := c.sessions[sessionKey]
-	delete(c.active, sessionKey)
-	delete(c.sessions, sessionKey)
-	c.sessionsMu.Unlock()
-
-	if session == nil || session.plugin == nil {
-		return nil
+	session, err := c.sessionStore.LoadSession(ctx, sessionKey)
+	if err != nil && !errors.Is(err, ErrSessionRequired) {
+		return err
 	}
-	return session.plugin.Close(ctx)
+	if err := c.sessionStore.DeleteSession(ctx, sessionKey); err != nil {
+		return err
+	}
+
+	var closeErr error
+	if session != nil && session.plugin != nil {
+		closeErr = session.plugin.Close(ctx)
+	}
+	return closeErr
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) play(ctx context.Context, sessionKey ID, guestData K, session *Session[K], dispatch dispatcher.Dispatcher[K], req PlayRequest) PlayResult[K] {
@@ -333,4 +411,12 @@ func (s *Session[K]) finishPlay(keepDispatcher bool) {
 func (s *Session[K]) recordYield(call dispatcher.Call) {
 	copied := call.Copy()
 	s.yielded = &copied
+}
+
+func (c *ComputeCompiledPlugin[ID, K]) saveSession(ctx context.Context, sessionKey ID) error {
+	session, err := c.sessionStore.LoadSession(ctx, sessionKey)
+	if err != nil {
+		return err
+	}
+	return c.sessionStore.SaveSession(ctx, sessionKey, session)
 }
