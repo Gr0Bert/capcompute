@@ -78,6 +78,10 @@ func TestNewComputeCompiledPluginRequiresSessionStore(t *testing.T) {
 	}
 }
 
+func TestComputeCompiledPluginExposesCompiledCleanup(t *testing.T) {
+	var _ func(*ComputeCompiledPlugin[string, testSessionKey], context.Context) error = (*ComputeCompiledPlugin[string, testSessionKey]).CloseCompiled
+}
+
 func TestPlayStatusReadsYieldedOutput(t *testing.T) {
 	if got := playStatus([]byte(`{"status":"yielded"}`)); got != PlayYielded {
 		t.Fatalf("status = %s, want %s", got, PlayYielded)

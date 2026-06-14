@@ -29,7 +29,7 @@ type Config[ID comparable, K SessionKey[ID]] struct {
 	SessionStore   SessionStore[ID, K]
 }
 
-// ComputeCompiledPlugin owns one compiled module, dispatcher factory, and per-key sessions.
+// ComputeCompiledPlugin owns one compiled module and dispatcher factory.
 type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
 	dispatchers    dispatcher.DispatcherFactory[K]
@@ -38,7 +38,7 @@ type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 }
 
 // Session owns the reusable Extism plugin instance for one key.
-// Session state is not thread-safe; ComputeCompiledPlugin serializes Play per key.
+// Session state is not thread-safe; callers coordinate concurrent use.
 type Session[K any] struct {
 	GuestData  K
 	Input      json.RawMessage
@@ -83,6 +83,11 @@ func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Conte
 	return compute, nil
 }
 
+// CloseCompiled releases the compiled Extism plugin without touching sessions or stores.
+func (c *ComputeCompiledPlugin[ID, K]) CloseCompiled(ctx context.Context) error {
+	return c.compiled.Close(ctx)
+}
+
 // PlayRequest is one guest invocation attempt.
 type PlayRequest[ID comparable, K SessionKey[ID]] struct {
 	Input      json.RawMessage
@@ -114,6 +119,7 @@ func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, reques
 	}
 	newDispatcher, err := c.dispatchers.NewDispatcher(ctx, request.UserData)
 	if err != nil {
+		_ = plugin.Close(ctx)
 		return nil, err
 	}
 
@@ -126,7 +132,7 @@ func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, reques
 	}, nil
 }
 
-// Play starts one exclusive guest invocation for key in its own goroutine.
+// Play invokes a session in its own goroutine.
 func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session *Session[K]) (<-chan PlayResult[K], error) {
 	sessionKey := session.GuestData.SessionKey()
 	results := make(chan PlayResult[K], 1)
