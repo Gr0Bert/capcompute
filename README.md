@@ -55,15 +55,24 @@ A host application usually does this:
 3. Save the session in the `SessionStore` before calling `Play` if the guest can
    call host capabilities.
 4. Call `Play`.
-5. Read the single `PlayResult` from the returned channel.
+5. Read the single `PlayResult` from the returned handle's result channel.
 6. Decide whether to save, keep, delete, recreate, or close the session.
 
 `CreateSession` does not save anything. This is intentional. The caller decides
 when a session becomes visible to host callbacks.
 
 `Play` invokes the configured entrypoint on the session's reusable Extism plugin
-instance. It returns a channel because execution happens in a goroutine, but each
-call to `Play` sends exactly one `PlayResult` and then closes the channel.
+instance. It returns a `PlayHandle` because execution happens in a goroutine.
+Each handle sends exactly one `PlayResult` and then closes its result channel.
+Calling `Stop` interrupts the invocation and permanently terminates that physical
+session instance.
+
+Calling `Play` again on a stopped session returns `ErrSessionTerminated`.
+Recreate the logical run with `CreateSession`, the same request and session key,
+then replace the old session in the store. A replay dispatcher can reuse
+previously committed outcomes from the same journal. The capability call that
+was active during cancellation may execute again because it had no committed
+outcome.
 
 ## Session Model
 
@@ -163,6 +172,8 @@ from its exported function with the play-result convention described below.
 `PlayResult.Status` is derived from the Extism call result:
 
 - `PlayFailed`: the guest call returned an Extism/runtime error;
+- `PlayStopped`: the play context was cancelled and the physical session was
+  terminated;
 - `PlayYielded`: the guest succeeded and returned JSON with
   `{"status":"yielded"}`;
 - `PlayCompleted`: the guest succeeded and returned anything else.
@@ -207,17 +218,19 @@ if err := store.SaveSession(ctx, run.SessionKey(), session); err != nil {
 	return err
 }
 
-results, err := compute.Play(ctx, session)
+handle, err := compute.Play(ctx, session)
 if err != nil {
 	return err
 }
 
-result := <-results
+result := <-handle.Results()
 switch result.Status {
 case capcompute.PlayCompleted:
 	// The guest finished this play attempt.
 case capcompute.PlayYielded:
 	// Keep or persist enough state for the wrapping system to resume later.
+case capcompute.PlayStopped:
+	// Recreate the session before replaying this logical run.
 case capcompute.PlayFailed:
 	// Inspect result.Err and apply application error policy.
 }

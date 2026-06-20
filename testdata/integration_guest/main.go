@@ -77,6 +77,10 @@ func run() int32 {
 		pdk.SetErrorString("guest requested failure")
 		return 1
 
+	case "infinite":
+		for {
+		}
+
 	default:
 		pdk.SetErrorString("unknown mode")
 		return 1

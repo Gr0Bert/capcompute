@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 
 	extism "github.com/extism/go-sdk"
+	"github.com/tetratelabs/wazero"
 )
 
 var (
 	ErrDispatcherRequired   = errors.New("dispatcher is required")
+	ErrSessionActive        = errors.New("session is already active")
 	ErrSessionRequired      = errors.New("session is required")
 	ErrSessionStoreRequired = errors.New("session store is required")
+	ErrSessionTerminated    = errors.New("session is terminated")
 )
 
 // SessionKey lets user-owned run data expose the stable identity used for session maps.
@@ -45,10 +49,78 @@ type Session[K any] struct {
 	Entrypoint string
 	plugin     *extism.Plugin
 	dispatcher dispatcher.Dispatcher[K]
+	state      sessionState
+}
+
+type sessionStatus uint8
+
+const (
+	sessionIdle sessionStatus = iota
+	sessionActive
+	sessionTerminated
+)
+
+type sessionState struct {
+	mu     sync.Mutex
+	status sessionStatus
+}
+
+func (s *sessionState) start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch s.status {
+	case sessionIdle:
+		s.status = sessionActive
+		return nil
+	case sessionActive:
+		return ErrSessionActive
+	case sessionTerminated:
+		return ErrSessionTerminated
+	default:
+		panic("invalid session status")
+	}
+}
+
+func (s *sessionState) finish(stopped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.status != sessionActive {
+		panic("cannot finish inactive session")
+	}
+	if stopped {
+		s.status = sessionTerminated
+		return
+	}
+	s.status = sessionIdle
+}
+
+func (s *sessionState) terminate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch s.status {
+	case sessionIdle:
+		s.status = sessionTerminated
+		return nil
+	case sessionActive:
+		return ErrSessionActive
+	case sessionTerminated:
+		return nil
+	default:
+		panic("invalid session status")
+	}
 }
 
 // Close releases the Extism plugin instance owned by this session.
 func (session *Session[K]) Close(ctx context.Context) error {
+	if session == nil {
+		return ErrSessionRequired
+	}
+	if err := session.state.terminate(); err != nil {
+		return err
+	}
 	return session.plugin.Close(ctx)
 }
 
@@ -72,6 +144,12 @@ func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Conte
 		sessionStore:   config.SessionStore,
 		instanceConfig: config.InstanceConfig,
 	}
+
+	runtimeConfig := config.PluginConfig.RuntimeConfig
+	if runtimeConfig == nil {
+		runtimeConfig = wazero.NewRuntimeConfig()
+	}
+	config.PluginConfig.RuntimeConfig = runtimeConfig.WithCloseOnContextDone(true)
 
 	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
 		hostFunction(compute.sessionStore),
@@ -101,6 +179,7 @@ type PlayStatus string
 const (
 	PlayCompleted PlayStatus = "completed"
 	PlayYielded   PlayStatus = "yielded"
+	PlayStopped   PlayStatus = "stopped"
 	PlayFailed    PlayStatus = "failed"
 )
 
@@ -110,6 +189,40 @@ type PlayResult[K any] struct {
 	Output json.RawMessage
 	Exit   uint32
 	Err    error
+}
+
+// PlayHandle controls one active guest invocation.
+type PlayHandle[K any] struct {
+	results chan PlayResult[K]
+	cancel  context.CancelFunc
+
+	mu            sync.Mutex
+	finished      bool
+	stopRequested bool
+}
+
+// Results returns the channel that receives exactly one result before closing.
+func (h *PlayHandle[K]) Results() <-chan PlayResult[K] {
+	if h == nil {
+		return nil
+	}
+	return h.results
+}
+
+// Stop interrupts this invocation. It is safe to call Stop more than once.
+func (h *PlayHandle[K]) Stop() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.finished {
+		h.mu.Unlock()
+		return
+	}
+	h.stopRequested = true
+	cancel := h.cancel
+	h.mu.Unlock()
+	cancel()
 }
 
 func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, request PlayRequest[ID, K]) (*Session[K], error) {
@@ -132,37 +245,63 @@ func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, reques
 	}, nil
 }
 
-// Play invokes a session in its own goroutine.
-func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session *Session[K]) (<-chan PlayResult[K], error) {
+// Play invokes a session in its own goroutine and returns its control handle.
+func (c *ComputeCompiledPlugin[ID, K]) Play(ctx context.Context, session *Session[K]) (*PlayHandle[K], error) {
+	if session == nil {
+		return nil, ErrSessionRequired
+	}
+	if err := session.state.start(); err != nil {
+		return nil, err
+	}
+
 	sessionKey := session.GuestData.SessionKey()
-	results := make(chan PlayResult[K], 1)
+	callCtx, cancel := context.WithCancel(ctx)
+	handle := &PlayHandle[K]{
+		results: make(chan PlayResult[K], 1),
+		cancel:  cancel,
+	}
 	go func() {
-		defer close(results)
+		defer cancel()
+		defer close(handle.results)
 
-		callCtx := context.WithValue(ctx, sessionKeyContextKey{}, sessionKey)
+		pluginCtx := context.WithValue(callCtx, sessionKeyContextKey{}, sessionKey)
+		exit, output, err := session.plugin.CallWithContext(pluginCtx, session.Entrypoint, session.Input)
 
-		exit, output, err := session.plugin.CallWithContext(callCtx, session.Entrypoint, session.Input)
+		handle.mu.Lock()
+		stopped := handle.stopRequested || ctx.Err() != nil
+		handle.finished = true
+		handle.mu.Unlock()
+
+		session.state.finish(stopped)
+
+		if stopped {
+			stopErr := callCtx.Err()
+			if stopErr == nil {
+				stopErr = context.Canceled
+			}
+			handle.results <- PlayResult[K]{Status: PlayStopped, Exit: exit, Err: stopErr}
+			return
+		}
 		if err != nil {
-			results <- PlayResult[K]{Status: PlayFailed, Exit: exit, Err: err}
+			handle.results <- PlayResult[K]{Status: PlayFailed, Exit: exit, Err: err}
 			return
 		}
 		status := playStatus(output)
 		if status == PlayYielded {
-			results <- PlayResult[K]{
+			handle.results <- PlayResult[K]{
 				Status: PlayYielded,
 				Output: append(json.RawMessage(nil), output...),
 				Exit:   exit,
 			}
 			return
 		}
-		results <- PlayResult[K]{
+		handle.results <- PlayResult[K]{
 			Status: PlayCompleted,
 			Output: append(json.RawMessage(nil), output...),
 			Exit:   exit,
 		}
-		return
 	}()
-	return results, nil
+	return handle, nil
 }
 
 func playStatus(output []byte) PlayStatus {

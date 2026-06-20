@@ -11,7 +11,7 @@
 //   - create a Session from a PlayRequest;
 //   - save that Session in the SessionStore before invoking Play if the guest
 //     can call host capabilities;
-//   - call Play and read the single PlayResult from the returned channel;
+//   - call Play and read the single PlayResult from the returned handle;
 //   - close sessions and the compiled plugin at the application boundary.
 //
 // Host callbacks receive only the session id through context. The host function
@@ -19,9 +19,11 @@
 // session dispatcher. This keeps runtime lookup explicit and avoids hidden play
 // state in context.
 //
-// Play has three observable outcomes. A successful guest call whose JSON output
+// Play has four observable outcomes. A successful guest call whose JSON output
 // contains {"status":"yielded"} returns PlayYielded. Any other successful guest
-// call returns PlayCompleted. A guest or runtime error returns PlayFailed.
+// call returns PlayCompleted. A stopped invocation returns PlayStopped and
+// permanently terminates that physical session. A guest or runtime error returns
+// PlayFailed.
 //
 // SessionStore is a runtime lookup boundary. Durable stores should persist the
 // data needed by their application to recreate sessions, then hydrate a fresh
