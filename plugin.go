@@ -52,6 +52,14 @@ type Session[K any] struct {
 	state      sessionState
 }
 
+// Capabilities returns the operations exposed by this session's dispatcher.
+func (session *Session[K]) Capabilities() []dispatcher.Capability {
+	if session == nil {
+		return nil
+	}
+	return dispatcher.Capabilities(session.dispatcher)
+}
+
 type sessionStatus uint8
 
 const (

@@ -260,6 +260,12 @@ func (runDispatcher) Dispatch(ctx context.Context, run Run, call dispatcher.Call
 }
 ```
 
+Dispatchers may optionally implement `dispatcher.CapabilityProvider` to expose
+guest-callable operation metadata. `dispatcher.WithCapabilities` decorates an
+existing dispatcher without changing its dispatch behavior. Replay dispatchers
+forward capability metadata from their wrapped dispatcher, and
+`Session.Capabilities()` returns the capabilities of the exact session chain.
+
 ## Guest Convention
 
 Guests are normal Extism plugins. A Go/TinyGo guest can use

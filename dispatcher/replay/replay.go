@@ -59,6 +59,10 @@ func (d *Dispatcher[K]) CheckCompleted() error {
 	return nil
 }
 
+func (d *Dispatcher[K]) Capabilities() []dispatcher2.Capability {
+	return dispatcher2.Capabilities(d.next)
+}
+
 // DivergedError means the guest requested a different call than history recorded.
 type DivergedError struct {
 	Index int
