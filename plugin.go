@@ -12,7 +12,6 @@ import (
 )
 
 var (
-	ErrDispatcherRequired   = errors.New("dispatcher is required")
 	ErrInvalidGuestOutput   = errors.New("invalid guest output")
 	ErrSessionActive        = errors.New("session is already active")
 	ErrSessionRequired      = errors.New("session is required")
@@ -30,14 +29,12 @@ type Config[ID comparable, K SessionKey[ID]] struct {
 	Manifest       extism.Manifest
 	PluginConfig   extism.PluginConfig
 	InstanceConfig extism.PluginInstanceConfig
-	Dispatchers    dispatcher.DispatcherFactory[K]
 	SessionStore   SessionStore[ID, K]
 }
 
-// ComputeCompiledPlugin owns one compiled module and dispatcher factory.
+// ComputeCompiledPlugin owns one compiled module.
 type ComputeCompiledPlugin[ID comparable, K SessionKey[ID]] struct {
 	compiled       *extism.CompiledPlugin
-	dispatchers    dispatcher.DispatcherFactory[K]
 	sessionStore   SessionStore[ID, K]
 	instanceConfig extism.PluginInstanceConfig
 }
@@ -141,15 +138,11 @@ type SessionStore[ID comparable, K SessionKey[ID]] interface {
 
 // NewComputeCompiledPlugin compiles a module and registers the dispatcher host function.
 func NewComputeCompiledPlugin[ID comparable, K SessionKey[ID]](ctx context.Context, config Config[ID, K]) (*ComputeCompiledPlugin[ID, K], error) {
-	if config.Dispatchers == nil {
-		return nil, ErrDispatcherRequired
-	}
 	if config.SessionStore == nil {
 		return nil, ErrSessionStoreRequired
 	}
 
 	compute := &ComputeCompiledPlugin[ID, K]{
-		dispatchers:    config.Dispatchers,
 		sessionStore:   config.SessionStore,
 		instanceConfig: config.InstanceConfig,
 	}
@@ -180,6 +173,7 @@ type PlayRequest[ID comparable, K SessionKey[ID]] struct {
 	Input      json.RawMessage
 	Entrypoint string
 	UserData   K
+	Dispatcher dispatcher.Dispatcher[K]
 }
 
 // PlayStatus is the result of one guest invocation attempt.
@@ -239,18 +233,12 @@ func (c *ComputeCompiledPlugin[ID, K]) CreateSession(ctx context.Context, reques
 	if err != nil {
 		return nil, err
 	}
-	newDispatcher, err := c.dispatchers.NewDispatcher(ctx, request.UserData)
-	if err != nil {
-		_ = plugin.Close(ctx)
-		return nil, err
-	}
-
 	return &Session[K]{
 		GuestData:  request.UserData,
 		Input:      request.Input,
 		Entrypoint: request.Entrypoint,
 		plugin:     plugin,
-		dispatcher: newDispatcher,
+		dispatcher: request.Dispatcher,
 	}, nil
 }
 

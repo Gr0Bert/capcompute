@@ -30,8 +30,3 @@ func Capabilities[K any](value Dispatcher[K]) []Capability {
 	}
 	return cloneCapabilities(provider.Capabilities())
 }
-
-// DispatcherFactory creates the dispatcher chain for one play attempt.
-type DispatcherFactory[K any] interface {
-	NewDispatcher(ctx context.Context, key K) (Dispatcher[K], error)
-}

@@ -25,12 +25,6 @@ func (k integrationSessionKey) SessionKey() string {
 	return k.id
 }
 
-type integrationDispatcherFactory struct{}
-
-func (integrationDispatcherFactory) NewDispatcher(context.Context, integrationSessionKey) (dispatcher.Dispatcher[integrationSessionKey], error) {
-	return integrationDispatcher{}, nil
-}
-
 type integrationDispatcher struct{}
 
 func (integrationDispatcher) Dispatch(_ context.Context, _ integrationSessionKey, call dispatcher.Call) (dispatcher.Outcome, error) {
@@ -62,7 +56,6 @@ func TestTinyGoGuestPlayStates(t *testing.T) {
 		PluginConfig: extism.PluginConfig{
 			EnableWasi: true,
 		},
-		Dispatchers:  integrationDispatcherFactory{},
 		SessionStore: store,
 	})
 	if err != nil {
@@ -97,6 +90,7 @@ func TestTinyGoGuestPlayStates(t *testing.T) {
 				Input:      input,
 				Entrypoint: "run",
 				UserData:   sessionKey,
+				Dispatcher: integrationDispatcher{},
 			})
 			if err != nil {
 				t.Fatalf("create session: %v", err)
@@ -147,7 +141,6 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 		PluginConfig: extism.PluginConfig{
 			EnableWasi: true,
 		},
-		Dispatchers:  integrationDispatcherFactory{},
 		SessionStore: store,
 	})
 	if err != nil {
@@ -172,6 +165,7 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 		Input:      input,
 		Entrypoint: "run",
 		UserData:   sessionKey,
+		Dispatcher: integrationDispatcher{},
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)

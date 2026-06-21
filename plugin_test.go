@@ -22,17 +22,6 @@ func (testDispatcher) Dispatch(context.Context, testSessionKey, dispatcher.Call)
 	return dispatcher.Result(nil), nil
 }
 
-type testDispatcherFactory struct {
-	err error
-}
-
-func (f testDispatcherFactory) NewDispatcher(context.Context, testSessionKey) (dispatcher.Dispatcher[testSessionKey], error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return testDispatcher{}, nil
-}
-
 type testSessionStore struct {
 	sessions map[string]*Session[testSessionKey]
 	saveErr  error
@@ -61,19 +50,8 @@ func (s *testSessionStore) SaveSession(_ context.Context, sessionID string, sess
 	return nil
 }
 
-func TestNewComputeCompiledPluginRequiresDispatcherFactory(t *testing.T) {
-	_, err := NewComputeCompiledPlugin[string, testSessionKey](context.Background(), Config[string, testSessionKey]{
-		SessionStore: newTestSessionStore(nil),
-	})
-	if err != ErrDispatcherRequired {
-		t.Fatalf("error = %v, want ErrDispatcherRequired", err)
-	}
-}
-
 func TestNewComputeCompiledPluginRequiresSessionStore(t *testing.T) {
-	_, err := NewComputeCompiledPlugin[string, testSessionKey](context.Background(), Config[string, testSessionKey]{
-		Dispatchers: testDispatcherFactory{},
-	})
+	_, err := NewComputeCompiledPlugin[string, testSessionKey](context.Background(), Config[string, testSessionKey]{})
 	if err != ErrSessionStoreRequired {
 		t.Fatalf("error = %v, want ErrSessionStoreRequired", err)
 	}
