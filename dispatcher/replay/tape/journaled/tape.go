@@ -34,15 +34,6 @@ func (e ReplayDivergedError) Error() string {
 	return fmt.Sprintf("replay diverged at call %d: want %q got %q", e.Index, e.Want.Name, e.Got.Name)
 }
 
-// ReplayIncompleteError means the guest completed before replaying all recorded calls.
-type ReplayIncompleteError struct {
-	Remaining int
-}
-
-func (e ReplayIncompleteError) Error() string {
-	return fmt.Sprintf("replay incomplete: %d recorded calls were not consumed", e.Remaining)
-}
-
 // NewTape creates a journal-backed replay tape whose cursor starts at the beginning.
 func NewTape(journal Journal) *Tape {
 	return &Tape{journal, 0}
