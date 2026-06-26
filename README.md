@@ -25,10 +25,9 @@ The root `capcompute` package owns:
 
 Child packages own concrete implementations and optional strategies:
 
-- `dispatcher` defines `Call`, `Outcome`, `Dispatcher`, and `DispatcherFactory`;
+- `dispatcher` defines `Call`, `Outcome`, and `Dispatcher`;
 - `dispatcher/replay` provides a replay dispatcher decorator;
-- `dispatcher/replay/tape/journaled` provides a journal-backed replay tape;
-- `session_store_memory` provides an in-memory `SessionStore`.
+- `dispatcher/replay/tape/journaled` provides a journal-backed replay tape.
 
 ## What This Library Does Not Own
 
@@ -121,9 +120,9 @@ type SessionStore[ID comparable, K SessionKey[ID]] interface {
 The store owns session visibility. If a guest calls the host callback and the
 session is not in the store, the callback returns a failed host response.
 
-The in-memory implementation lives in `session_store_memory`. Durable stores
-should live outside the root package. A durable store can persist the
-application data needed to recreate sessions, then hydrate a new
+The library ships no concrete store; the application supplies a `SessionStore`
+— an in-memory map in tests, a durable store in production. A durable store can
+persist the application data needed to recreate sessions, then hydrate a new
 `ComputeCompiledPlugin` after process restart by calling `CreateSession` and
 `SaveSession` for each persistent session.
 
@@ -194,7 +193,9 @@ when to invoke the session again and what data should be available when it does.
 
 ```go
 ctx := context.Background()
-store := session_store_memory.New[string, Run]()
+// store is any SessionStore[string, Run] the application provides (an in-memory
+// map in tests, a durable store in production).
+store := newSessionStore()
 
 compute, err := capcompute.NewComputeCompiledPlugin[string, Run](ctx, capcompute.Config[string, Run]{
 	Manifest: extism.Manifest{
@@ -203,7 +204,6 @@ compute, err := capcompute.NewComputeCompiledPlugin[string, Run](ctx, capcompute
 	PluginConfig: extism.PluginConfig{
 		EnableWasi: true,
 	},
-	Dispatchers:  dispatcherFactory{},
 	SessionStore: store,
 })
 if err != nil {
@@ -216,6 +216,7 @@ session, err := compute.CreateSession(ctx, capcompute.PlayRequest[string, Run]{
 	Input:      json.RawMessage(`{"task":"example"}`),
 	Entrypoint: "run",
 	UserData:   run,
+	Dispatcher: runDispatcher{},
 })
 if err != nil {
 	return err
@@ -244,16 +245,10 @@ case capcompute.PlayFailed:
 }
 ```
 
-The dispatcher factory is application code. It builds a dispatcher chain for one
-session:
+The dispatcher is application code, supplied per session through
+`PlayRequest.Dispatcher`. It handles one session's guest host calls:
 
 ```go
-type dispatcherFactory struct{}
-
-func (dispatcherFactory) NewDispatcher(context.Context, Run) (dispatcher.Dispatcher[Run], error) {
-	return runDispatcher{}, nil
-}
-
 type runDispatcher struct{}
 
 func (runDispatcher) Dispatch(ctx context.Context, run Run, call dispatcher.Call) (dispatcher.Outcome, error) {

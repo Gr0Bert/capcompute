@@ -6,9 +6,8 @@
 // application scheduling stay outside this package.
 //
 // A typical runtime does the following:
-//   - build a ComputeCompiledPlugin with a wasm Manifest, a DispatcherFactory,
-//     and a SessionStore;
-//   - create a Session from a PlayRequest;
+//   - build a ComputeCompiledPlugin with a wasm Manifest and a SessionStore;
+//   - create a Session from a PlayRequest, which carries the session's dispatcher;
 //   - save that Session in the SessionStore before invoking Play if the guest
 //     can call host capabilities;
 //   - call Play and read the single PlayResult from the returned handle;

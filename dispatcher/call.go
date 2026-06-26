@@ -62,12 +62,3 @@ func (o Outcome) Copy() Outcome {
 	o.result = append(json.RawMessage(nil), o.result...)
 	return o
 }
-
-func (o Outcome) IsValid() bool {
-	switch o.Kind() {
-	case OutcomeResult, OutcomeYield, OutcomeFailed:
-		return true
-	default:
-		return false
-	}
-}
