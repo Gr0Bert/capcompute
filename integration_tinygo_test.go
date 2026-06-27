@@ -27,7 +27,7 @@ func (k integrationSessionKey) SessionKey() string {
 
 type integrationDispatcher struct{}
 
-func (integrationDispatcher) Dispatch(_ context.Context, _ integrationSessionKey, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (integrationDispatcher) Dispatch(_ context.Context, _ integrationSessionKey, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case "host.echo":
 		return dispatcher.Result(json.RawMessage(`{"echoed":true}`)), nil

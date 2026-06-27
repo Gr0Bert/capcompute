@@ -35,12 +35,12 @@ func NewDispatcher[K any](tape Tape, next dispatcher2.Dispatcher[K]) *Dispatcher
 	return &Dispatcher[K]{tape: tape, next: next}
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher2.Call) (dispatcher2.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher2.Call, auth dispatcher2.Authorization) (dispatcher2.Outcome, error) {
 	outcome, replayed, err := d.tape.Next(call)
 	if err != nil || replayed {
 		return outcome, err
 	}
-	outcome, err = d.next.Dispatch(ctx, key, call)
+	outcome, err = d.next.Dispatch(ctx, key, call, auth)
 	if err != nil {
 		return dispatcher2.Outcome{}, err
 	}

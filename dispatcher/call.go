@@ -39,7 +39,7 @@ func Yield(message string) Outcome {
 	return Outcome{kind: OutcomeYield, message: message}
 }
 
-func Failed(message string) Outcome {
+func Fail(message string) Outcome {
 	if message == "" {
 		message = "command failed"
 	}

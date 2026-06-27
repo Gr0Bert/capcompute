@@ -63,7 +63,7 @@ func TestResetReplaysRecordedFailures(t *testing.T) {
 	tape := journaled.NewTape(&fakeJournal{})
 	call := dispatcher.Call{Name: "step.one"}
 
-	if err := tape.Record(call, dispatcher.Failed("permission denied")); err != nil {
+	if err := tape.Record(call, dispatcher.Fail("permission denied")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 

@@ -31,10 +31,10 @@ func (t *tapeFunc) Remaining() int {
 	return 0
 }
 
-type nextFunc[K any] func(context.Context, K, dispatcher.Call) (dispatcher.Outcome, error)
+type nextFunc[K any] func(context.Context, K, dispatcher.Call, dispatcher.Authorization) (dispatcher.Outcome, error)
 
-func (f nextFunc[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call) (dispatcher.Outcome, error) {
-	return f(ctx, key, call)
+func (f nextFunc[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+	return f(ctx, key, call, auth)
 }
 
 func (nextFunc[K]) Capabilities() []dispatcher.Capability { return nil }
@@ -43,12 +43,12 @@ func TestDispatcherResetsTapeOnYield(t *testing.T) {
 	tape := &tapeFunc{}
 	replay := &Dispatcher[string]{
 		tape: tape,
-		next: nextFunc[string](func(context.Context, string, dispatcher.Call) (dispatcher.Outcome, error) {
+		next: nextFunc[string](func(context.Context, string, dispatcher.Call, dispatcher.Authorization) (dispatcher.Outcome, error) {
 			return dispatcher.Yield("waiting"), nil
 		}),
 	}
 
-	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"})
+	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -67,12 +67,12 @@ func TestDispatcherRecordsResult(t *testing.T) {
 	tape := &tapeFunc{}
 	replay := &Dispatcher[string]{
 		tape: tape,
-		next: nextFunc[string](func(context.Context, string, dispatcher.Call) (dispatcher.Outcome, error) {
+		next: nextFunc[string](func(context.Context, string, dispatcher.Call, dispatcher.Authorization) (dispatcher.Outcome, error) {
 			return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
 		}),
 	}
 
-	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"})
+	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -91,12 +91,12 @@ func TestDispatcherRecordsFailure(t *testing.T) {
 	tape := &tapeFunc{}
 	replay := &Dispatcher[string]{
 		tape: tape,
-		next: nextFunc[string](func(context.Context, string, dispatcher.Call) (dispatcher.Outcome, error) {
-			return dispatcher.Failed("denied"), nil
+		next: nextFunc[string](func(context.Context, string, dispatcher.Call, dispatcher.Authorization) (dispatcher.Outcome, error) {
+			return dispatcher.Fail("denied"), nil
 		}),
 	}
 
-	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"})
+	outcome, err := replay.Dispatch(context.Background(), "run-1", dispatcher.Call{Name: "step.one"}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

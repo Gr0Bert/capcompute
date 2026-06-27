@@ -18,9 +18,11 @@ func (k testSessionKey) SessionKey() string {
 
 type testDispatcher struct{}
 
-func (testDispatcher) Dispatch(context.Context, testSessionKey, dispatcher.Call) (dispatcher.Outcome, error) {
+func (testDispatcher) Dispatch(_ context.Context, _ testSessionKey, _ dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	return dispatcher.Result(nil), nil
 }
+
+func (testDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
 type testSessionStore struct {
 	sessions map[string]*Session[testSessionKey]

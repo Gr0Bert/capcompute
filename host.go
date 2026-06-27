@@ -54,7 +54,7 @@ func dispatchHostCall[ID comparable, K SessionKey[ID]](
 		return returnToGuest(plugin, hostResponse{Status: dispatcher.OutcomeFailed, Message: fmt.Errorf("decode call: %w", err).Error()})
 	}
 
-	outcome, err := session.dispatcher.Dispatch(ctx, session.GuestData, call)
+	outcome, err := session.dispatcher.Dispatch(ctx, session.GuestData, call, dispatcher.Authorization{})
 	if err != nil {
 		return returnToGuest(plugin, hostResponse{
 			Status:  dispatcher.OutcomeFailed,
