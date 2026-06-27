@@ -1,9 +1,9 @@
 package capcompute_test
 
 import (
-	"aurora-stores/memory"
-	"capcompute"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/memory"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"

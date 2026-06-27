@@ -7,7 +7,7 @@ package journaled
 
 import (
 	"bytes"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"fmt"
 )
 

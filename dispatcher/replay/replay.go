@@ -7,7 +7,7 @@
 package replay
 
 import (
-	dispatcher2 "capcompute/dispatcher"
+	dispatcher2 "github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"fmt"
 )
