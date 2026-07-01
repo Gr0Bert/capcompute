@@ -162,6 +162,53 @@ same append-only journal is the **audit trail** — every input, effect, capabil
 grant, and approval decision, in order. Durability and audit are one mechanism, by
 design (the write-ahead-log pattern: one log, crash-recovery + history).
 
+## Coherence under growth — the versioned-replay problem
+
+This is the **known hard problem** for any journal-replay system, capcompute
+included. Name it now, because it is the fault line where the clean model meets
+software evolution.
+
+**The problem.** A process is reconstructed by replaying its journal against its
+program. But programs change. When *brain v2* meets a journal written by *brain
+v1*, replay must still produce a consistent process — and that is not free:
+
+- Invariant #2 (determinism) means the replayed syscall sequence must match what
+  the new code produces. Adding/removing pure logic (e.g. log lines) is safe;
+  changing the *number, order, or arguments* of syscalls diverges from the journal
+  and replay fails.
+- This is unsolved in the general case. Golem — further along than us — only
+  guarantees compatible changes and is still actively working state migration and
+  hot-update recovery (see golemcloud/golem issue #534). Temporal exposes the same
+  constraint as "non-deterministic workflow changes" and pushes users to versioned
+  branching. **There is no free lunch here; there is only a chosen discipline.**
+
+**What we owe the design (decide before it bites):**
+
+1. **Version the program in the journal.** Every journal records the program
+   version that produced it. Replay knows which code it is replaying against.
+2. **Define the compatibility contract.** State plainly which changes are
+   replay-safe (pure logic, added tail capabilities) and which are breaking
+   (reordering/removing/retyping syscalls). This is the guest-author's law, the
+   same way the ABI is the driver-author's law.
+3. **Provide an escape hatch for breaking changes.** Options, cheapest first:
+   - *drain* — finish all in-flight processes on v1 before deploying v2 (simplest;
+     often enough for short-lived runs);
+   - *pinned replay* — replay each process against the exact version that wrote its
+     journal, and only run *new* processes on the new version (Golem's default
+     posture);
+   - *migration* — a guest-provided function that transforms v1 journal/state into
+     v2 (most powerful, most complex; defer until required).
+4. **Snapshot to bound replay cost.** As journals grow, replay-from-zero gets
+   expensive. A periodic committed snapshot (checkpoint) of process state caps
+   replay to "since last snapshot" — the classic single-level-store move, and it
+   also gives migration a clean seam.
+
+**Why it matters more than the renames.** Post-rename the system reads as
+coherent, but coherence is only *proven* when it survives change. "How does brain
+v2 replay a v1 journal?" is the question that tests whether this architecture stays
+coherent as it does real work. Answer it deliberately; do not let the first
+breaking brain change answer it by accident.
+
 ## Non-goals (resist gold-plating)
 
 The metaphor is a map, not a checklist. Implement an OS concept only when a real
