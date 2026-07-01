@@ -15,6 +15,10 @@ type Capability struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// Hidden keeps a capability dispatchable but excluded from the brain's
+	// discoverable tool menu (e.g. the LLM cognition tool the brain calls by a
+	// name it already knows).
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // Decision is the outcome of an external (human-in-the-loop) task approval.
