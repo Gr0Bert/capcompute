@@ -18,8 +18,21 @@ type Tape struct {
 	cursor  int
 }
 
-// Journal stores durable records for a tape.
+// Header identifies what wrote a journal: the syscall ABI version and the
+// program (e.g. an artifact digest). Replay against a different program is
+// refused up front — the versioned-replay law (see docs/ARCHITECTURE.md,
+// "Coherence under growth") — instead of failing later as a confusing
+// divergence.
+type Header struct {
+	ABI     int    `json:"abi"`
+	Program string `json:"program"`
+}
+
+// Journal stores durable records for a tape, plus the header identifying
+// their writer.
 type Journal interface {
+	Header() (header Header, ok bool, err error)
+	SetHeader(Header) error
 	Load(idx int) (Record, error)
 	Store(idx int, syscall sys.Syscall, result sys.SyscallResult) error
 	Length() int
@@ -41,9 +54,37 @@ func (e ReplayDivergedError) Error() string {
 	return fmt.Sprintf("replay diverged at syscall %d: want %q got %q", e.Index, e.Want.Name, e.Got.Name)
 }
 
-// NewTape creates a journal-backed replay tape whose cursor starts at the beginning.
-func NewTape(journal Journal) *Tape {
-	return &Tape{journal, 0}
+// ReplayIncompatibleError means the journal was written by a different program
+// or ABI than the one attempting to replay it.
+type ReplayIncompatibleError struct {
+	Recorded Header
+	Current  Header
+}
+
+func (e ReplayIncompatibleError) Error() string {
+	return fmt.Sprintf("journal written by program %q (abi %d); cannot replay as program %q (abi %d)",
+		e.Recorded.Program, e.Recorded.ABI, e.Current.Program, e.Current.ABI)
+}
+
+// NewTape creates a journal-backed replay tape whose cursor starts at the
+// beginning. The header identifies the program about to run: a fresh journal
+// is stamped with it; a journal written by a different program or ABI is
+// refused with ReplayIncompatibleError.
+func NewTape(journal Journal, header Header) (*Tape, error) {
+	recorded, ok, err := journal.Header()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := journal.SetHeader(header); err != nil {
+			return nil, err
+		}
+		return &Tape{journal, 0}, nil
+	}
+	if recorded != header {
+		return nil, ReplayIncompatibleError{Recorded: recorded, Current: header}
+	}
+	return &Tape{journal, 0}, nil
 }
 
 // Next returns a recorded result for syscall, or ok=false when syscall is new.

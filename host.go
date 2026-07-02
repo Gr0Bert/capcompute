@@ -13,9 +13,15 @@ import (
 type pidContextKey struct{}
 
 type hostResponse struct {
+	Abi     int               `json:"abi"`
 	Status  sys.SyscallStatus `json:"status"`
+	Code    sys.Errno         `json:"code,omitempty"`
 	Result  json.RawMessage   `json:"result,omitempty"`
 	Message string            `json:"message,omitempty"`
+}
+
+func failResponse(errno sys.Errno, message string) hostResponse {
+	return hostResponse{Abi: sys.ABIVersion, Status: sys.StatusFailed, Code: errno, Message: message}
 }
 
 // hostFunction registers the single syscall entry point. Guests import
@@ -41,32 +47,35 @@ func dispatchSyscall[ID comparable, K PID[ID]](
 ) uint64 {
 	pid, ok := ctx.Value(pidContextKey{}).(ID)
 	if !ok {
-		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: "pid missing from context"})
+		return returnToGuest(plugin, failResponse(sys.ErrnoInternal, "pid missing from context"))
 	}
 	process, err := table.LoadProcess(ctx, pid)
 	if err != nil {
-		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: "process not found"})
+		return returnToGuest(plugin, failResponse(sys.ErrnoNotFound, "process not found"))
 	}
 	rawSyscall, err := plugin.ReadBytes(offset)
 	if err != nil {
-		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: fmt.Errorf("read raw syscall: %w", err).Error()})
+		return returnToGuest(plugin, failResponse(sys.ErrnoInvalidArgs, fmt.Errorf("read raw syscall: %w", err).Error()))
 	}
 
 	var syscall sys.Syscall
 	if err := json.Unmarshal(rawSyscall, &syscall); err != nil {
-		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: fmt.Errorf("decode syscall: %w", err).Error()})
+		return returnToGuest(plugin, failResponse(sys.ErrnoInvalidArgs, fmt.Errorf("decode syscall: %w", err).Error()))
+	}
+	if syscall.Abi != sys.ABIVersion {
+		return returnToGuest(plugin, failResponse(sys.ErrnoBadABI,
+			fmt.Sprintf("syscall abi %d, host speaks %d", syscall.Abi, sys.ABIVersion)))
 	}
 
 	result, err := process.dispatcher.Dispatch(ctx, process.GuestData, syscall, sys.Authorization{})
 	if err != nil {
-		return returnToGuest(plugin, hostResponse{
-			Status:  sys.StatusFailed,
-			Message: err.Error(),
-		})
+		return returnToGuest(plugin, failResponse(sys.ErrnoInternal, err.Error()))
 	}
 
 	return returnToGuest(plugin, hostResponse{
+		Abi:     sys.ABIVersion,
 		Status:  result.Status(),
+		Code:    result.Errno(),
 		Result:  result.Result(),
 		Message: result.Message(),
 	})

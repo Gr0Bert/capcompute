@@ -3,8 +3,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/extism/go-pdk"
 )
@@ -12,17 +15,22 @@ import (
 //go:wasmimport extism:host/compute syscall
 func hostSyscall(uint64) uint64
 
+const abiVersion = 2
+
 type input struct {
 	Mode string `json:"mode"`
 }
 
 type syscall struct {
+	Abi  int             `json:"abi"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
 type hostResponse struct {
+	Abi     int             `json:"abi"`
 	Status  string          `json:"status"`
+	Code    string          `json:"code,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Message string          `json:"message,omitempty"`
 }
@@ -81,6 +89,39 @@ func run() int32 {
 		for {
 		}
 
+	// ambient reads the WASI clock and RNG — the sources the kernel pins.
+	// The host test runs this mode on two fresh processes and requires
+	// identical observations (kernel law #2: determinism).
+	case "ambient":
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			pdk.SetError(fmt.Errorf("random_get: %w", err))
+			return 1
+		}
+		now := time.Now().UTC()
+		observation, err := json.Marshal(map[string]string{
+			"time": now.Format(time.RFC3339Nano),
+			"rand": hex.EncodeToString(buf),
+		})
+		if err != nil {
+			pdk.SetError(err)
+			return 1
+		}
+		if err := pdk.OutputJSON(output{Status: "completed", Observation: observation}); err != nil {
+			pdk.SetError(err)
+			return 1
+		}
+		return 0
+
+	// http attempts ambient network through extism:host/env http_request,
+	// bypassing the syscall dispatcher. The kernel refuses images with
+	// allowed_hosts, so this must fail (kernel law #1: no ambient authority).
+	case "http":
+		request := pdk.NewHTTPRequest(pdk.MethodGet, "https://example.com")
+		response := request.Send()
+		pdk.SetErrorString(fmt.Sprintf("ambient http succeeded with status %d", response.Status()))
+		return 1
+
 	default:
 		pdk.SetErrorString("unknown mode")
 		return 1
@@ -88,6 +129,7 @@ func run() int32 {
 }
 
 func dispatch(sc syscall) (hostResponse, error) {
+	sc.Abi = abiVersion
 	data, err := json.Marshal(sc)
 	if err != nil {
 		return hostResponse{}, fmt.Errorf("encode syscall: %w", err)
@@ -102,7 +144,7 @@ func dispatch(sc syscall) (hostResponse, error) {
 		return hostResponse{}, fmt.Errorf("decode host response: %w", err)
 	}
 	if response.Status == "failed" {
-		return hostResponse{}, fmt.Errorf("host failed: %s", response.Message)
+		return hostResponse{}, fmt.Errorf("host failed (%s): %s", response.Code, response.Message)
 	}
 	return response, nil
 }

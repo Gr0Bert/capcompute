@@ -65,11 +65,23 @@ context), dispatches the `Syscall` through that process's driver chain, and
 returns a `SyscallResult`.
 
 ```
-Syscall:       { "name": string, "args": <json> }
-SyscallResult: { "status": "result" | "yield" | "failed",
+Syscall:       { "abi": 2, "name": string, "args": <json> }
+SyscallResult: { "abi": 2,
+                 "status": "result" | "yield" | "failed",
+                 "code":   errno,    // when failed: denied | expired |
+                                     // not_found | invalid_args | transient |
+                                     // internal | bad_abi
                  "result": <json>,   // when result
                  "message": string } // when yield/failed
 ```
+
+The envelope is versioned (`sys.ABIVersion`); the host rejects mismatches with
+errno `bad_abi`. Failures carry a machine-readable errno alongside the human
+message so guests branch on a closed set instead of parsing prose. Two names
+are reserved for savepoint brackets — `sys.begin` / `sys.commit`
+(`sys.SyscallBegin`/`sys.SyscallCommit`), journaled as side-effect-free
+markers with stack semantics; failed-run resume forks the journal past the
+outermost unclosed bracket.
 
 Guest programs return `{"status":"completed",...}` or `{"status":"yielded"}` from
 their entrypoint. **This ABI is your POSIX: version it, keep it small, and treat
@@ -84,8 +96,14 @@ governance and durability claims *provable* rather than aspirational.
 1. **No ambient authority.** A process can do nothing except call granted
    capabilities. (This is the crown jewel — the moment a guest is given ambient
    WASI/host access "for convenience," enforcement degrades to advisory.)
+   *Enforced in code:* `NewKernel` rejects images with `allowed_hosts`/
+   `allowed_paths` (`ErrAmbientAuthority`); guest module config is
+   kernel-constructed, never caller-supplied (`ambient.go`).
 2. **Determinism.** Guests are deterministic; *all* non-determinism (clock,
    randomness, I/O) flows through syscalls. No wall-clock or RNG inside a guest.
+   *Enforced in code:* the WASI clock and RNG a guest can reach are pinned to
+   deterministic sources that restart identically per instance (`ambient.go`),
+   so a crash-replay observes the original sequence.
 3. **Journal-before-observe.** Every side-effecting syscall's outcome is committed
    to the journal before it is observable, so replay is exact. (`yield` is never
    committed — it is a re-triable, blocking syscall.)

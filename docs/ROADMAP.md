@@ -6,17 +6,17 @@ prior-art review behind several items). Score = impact on
 coherence/capability (H/M/L) × effort (S/M/L). The order below is the
 recommended sequence; each item is deliberately small enough to land alone.
 
-| # | Item | Impact | Effort |
-|---|------|--------|--------|
-| 0 | Ambient-surface lockdown (kernel owns guest WASI sources) | H | S |
-| 1 | Journal program-versioning + replay compatibility check | H | S–M |
-| 2 | Kernel-law CI tests (the five invariants as tests) | H | S–M |
-| 3 | Hash-chained journal (tamper-evident audit) | M–H | S |
-| 4 | Capability attenuation helper in `sys` | M | S |
-| 5 | `process.spawn` syscall (sync-first child processes) | H | M |
-| 6 | ABI version field in the syscall envelope | M | S |
-| 7 | Snapshot/checkpoint to bound replay cost | M | L — deferred |
-| 8 | Sources-as-inbound-drivers refactor (aurora-k8s-agent) | M | M — deferred |
+| # | Item | Impact | Effort | Status |
+|---|------|--------|--------|--------|
+| 0 | Ambient-surface lockdown (kernel owns guest WASI sources) | H | S | **done** (`ambient.go`, `ErrAmbientAuthority`) |
+| 1 | Journal program-versioning + replay compatibility check | H | S–M | **done** (`journaled.Header`, `ReplayIncompatibleError`) |
+| 2 | Kernel-law CI tests (the five invariants as tests) | H | S–M | partial — laws 1/2 tested (unit + TinyGo ambient/http modes); approval-gate test lives with the runtime |
+| 3 | Hash-chained journal (tamper-evident audit) | M–H | S | open |
+| 4 | Capability attenuation helper in `sys` | M | S | **done** (`sys.Attenuate`) |
+| 5 | `process.spawn` syscall (sync-first child processes) | H | M | open |
+| 6 | ABI v2 bundle: version field, errnos, savepoint syscalls | M | S | **done** (`sys.ABIVersion=2`, `sys.Errno`, `sys.SyscallBegin/Commit`) |
+| 7 | Snapshot/checkpoint to bound replay cost | M | L | deferred |
+| 8 | Sources-as-inbound-drivers refactor (aurora-k8s-agent) | M | M | deferred |
 
 ## 0. Ambient-surface lockdown
 

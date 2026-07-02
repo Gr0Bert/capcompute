@@ -13,6 +13,7 @@ import (
 )
 
 var (
+	ErrAmbientAuthority     = errors.New("image grants ambient authority")
 	ErrInvalidGuestOutput   = errors.New("invalid guest output")
 	ErrProcessActive        = errors.New("process is already active")
 	ErrProcessRequired      = errors.New("process is required")
@@ -28,18 +29,22 @@ type PID[ID comparable] interface {
 }
 
 // Config contains everything needed to compile a program and create per-run instances.
+//
+// Image is the program image (an Extism manifest naming the wasm and static
+// config). It must not grant ambient authority: AllowedHosts and AllowedPaths
+// must be empty — network and filesystem access are capabilities served by the
+// dispatcher, never ambient rights. Guest module configuration (clock, RNG,
+// env) is owned by the kernel and cannot be supplied by the caller.
 type Config[ID comparable, K PID[ID]] struct {
-	Manifest       extism.Manifest
-	PluginConfig   extism.PluginConfig
-	InstanceConfig extism.PluginInstanceConfig
-	ProcessTable   ProcessTable[ID, K]
+	Image        extism.Manifest
+	PluginConfig extism.PluginConfig
+	ProcessTable ProcessTable[ID, K]
 }
 
 // Kernel owns one compiled program image and spawns processes from it.
 type Kernel[ID comparable, K PID[ID]] struct {
-	compiled       *extism.CompiledPlugin
-	processTable   ProcessTable[ID, K]
-	instanceConfig extism.PluginInstanceConfig
+	compiled     *extism.CompiledPlugin
+	processTable ProcessTable[ID, K]
 }
 
 // Process owns the reusable Extism plugin instance for one PID.
@@ -139,15 +144,22 @@ type ProcessTable[ID comparable, K PID[ID]] interface {
 	SaveProcess(ctx context.Context, pid ID, process *Process[K]) error
 }
 
-// NewKernel compiles a program and registers the syscall host function.
+// NewKernel compiles a program and registers the syscall host function. It
+// rejects images that grant ambient authority (non-empty AllowedHosts or
+// AllowedPaths) with ErrAmbientAuthority.
 func NewKernel[ID comparable, K PID[ID]](ctx context.Context, config Config[ID, K]) (*Kernel[ID, K], error) {
 	if config.ProcessTable == nil {
 		return nil, ErrProcessTableRequired
 	}
+	if len(config.Image.AllowedHosts) > 0 {
+		return nil, errors.Join(ErrAmbientAuthority, errors.New("image sets allowed_hosts; network access must be a dispatched capability"))
+	}
+	if len(config.Image.AllowedPaths) > 0 {
+		return nil, errors.Join(ErrAmbientAuthority, errors.New("image sets allowed_paths; filesystem access must be a dispatched capability"))
+	}
 
 	kernel := &Kernel[ID, K]{
-		processTable:   config.ProcessTable,
-		instanceConfig: config.InstanceConfig,
+		processTable: config.ProcessTable,
 	}
 
 	runtimeConfig := config.PluginConfig.RuntimeConfig
@@ -156,7 +168,7 @@ func NewKernel[ID comparable, K PID[ID]](ctx context.Context, config Config[ID, 
 	}
 	config.PluginConfig.RuntimeConfig = runtimeConfig.WithCloseOnContextDone(true)
 
-	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
+	compiled, err := extism.NewCompiledPlugin(ctx, config.Image, config.PluginConfig, []extism.HostFunction{
 		hostFunction(kernel.processTable),
 	})
 	if err != nil {
@@ -236,7 +248,9 @@ func (h *ResumeHandle[K]) Stop() {
 // It does not save the process; the caller decides when it becomes visible in
 // the process table.
 func (k *Kernel[ID, K]) CreateProcess(ctx context.Context, spec ProcessSpec[ID, K]) (*Process[K], error) {
-	plugin, err := k.compiled.Instance(ctx, k.instanceConfig)
+	plugin, err := k.compiled.Instance(ctx, extism.PluginInstanceConfig{
+		ModuleConfig: guestModuleConfig(),
+	})
 	if err != nil {
 		return nil, err
 	}

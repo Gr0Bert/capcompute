@@ -49,12 +49,23 @@ Child packages own concrete implementations and optional strategies:
 
 Those belong to the system wrapping this library.
 
+## Ambient Authority and Determinism
+
+The kernel owns every ambient source a guest can observe. Guest module
+configuration (clock, RNG, environment) is constructed inside the kernel —
+pinned to deterministic sources that restart identically per instance — and
+cannot be supplied by the caller. `NewKernel` rejects images that set
+`allowed_hosts` or `allowed_paths` with `ErrAmbientAuthority`: network and
+filesystem access are capabilities served by the dispatcher, never ambient
+rights. If a guest needs real time or randomness, expose it as a journaled
+capability.
+
 ## Runtime Flow
 
 A host application usually does this:
 
-1. Create a `Kernel` with an Extism manifest, a dispatcher factory, and a
-   process table.
+1. Create a `Kernel` with a program image (`Config.Image`, an Extism
+   manifest), a dispatcher factory, and a process table.
 2. Create a `Process` from a `ProcessSpec`.
 3. Save the process in the `ProcessTable` before calling `Resume` if the guest
    can make syscalls.
@@ -138,10 +149,12 @@ Guests call this imported function:
 func hostSyscall(uint64) uint64
 ```
 
-The argument points to JSON matching `sys.Syscall`:
+The argument points to JSON matching `sys.Syscall` (`abi` must equal
+`sys.ABIVersion`, currently 2; mismatches fail with code `bad_abi`):
 
 ```json
 {
+  "abi": 2,
   "name": "tool.name",
   "args": {"any": "json"}
 }
@@ -159,6 +172,7 @@ The host response has this shape:
 
 ```json
 {
+  "abi": 2,
   "status": "result",
   "result": {"any": "json"}
 }
@@ -168,7 +182,15 @@ The host response has this shape:
 
 - `result`: the syscall completed and returned JSON;
 - `yield`: the host needs outside work before the guest can make progress;
-- `failed`: the syscall failed.
+- `failed`: the syscall failed — `code` then carries a machine-readable
+  errno (`denied`, `expired`, `not_found`, `invalid_args`, `transient`,
+  `internal`, `bad_abi`) alongside the human `message`.
+
+Two syscall names are reserved for savepoint brackets: `sys.begin` and
+`sys.commit` (`sys.SyscallBegin`/`sys.SyscallCommit`). Hosts journal them as
+side-effect-free markers; on a failed-run resume the journal is forked just
+past the outermost unclosed `sys.begin` so the whole declared unit
+re-executes. Brackets have stack semantics.
 
 The guest decides what to do with that response. In particular, a host `yield`
 does not automatically pause the guest. The guest must return from its exported
@@ -202,7 +224,7 @@ ctx := context.Background()
 table := memory.NewProcessTable[string, Run]()
 
 kernel, err := capcompute.NewKernel[string, Run](ctx, capcompute.Config[string, Run]{
-	Manifest: extism.Manifest{
+	Image: extism.Manifest{
 		Wasm: []extism.Wasm{extism.WasmFile{Path: "plugin.wasm"}},
 	},
 	PluginConfig: extism.PluginConfig{

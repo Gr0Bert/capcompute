@@ -53,7 +53,7 @@ func TestTinyGoGuestResumeStates(t *testing.T) {
 	wasmPath := buildTinyGoIntegrationGuest(t)
 	table := memory.NewProcessTable[string, integrationPID]()
 	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
-		Manifest: extism.Manifest{
+		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
 		},
 		PluginConfig: extism.PluginConfig{
@@ -138,7 +138,7 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 	wasmPath := buildTinyGoIntegrationGuest(t)
 	table := memory.NewProcessTable[string, integrationPID]()
 	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
-		Manifest: extism.Manifest{
+		Image: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
 		},
 		PluginConfig: extism.PluginConfig{
@@ -243,4 +243,131 @@ func buildTinyGoIntegrationGuest(t *testing.T) string {
 		t.Fatalf("build integration guest: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	return wasmPath
+}
+
+// Kernel law #2 (determinism): two fresh processes running the ambient mode —
+// which reads the WASI clock and RNG the kernel pins — must observe identical
+// values. A crash-replay is exactly a fresh process re-running the same code,
+// so equality here is what makes un-journaled ambient reads safe.
+func TestTinyGoGuestAmbientReadsAreDeterministic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TinyGo integration test in short mode")
+	}
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
+	}
+
+	ctx := context.Background()
+	wasmPath := buildTinyGoIntegrationGuest(t)
+	table := memory.NewProcessTable[string, integrationPID]()
+	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
+		Image: extism.Manifest{
+			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
+		},
+		PluginConfig: extism.PluginConfig{EnableWasi: true},
+		ProcessTable: table,
+	})
+	if err != nil {
+		t.Fatalf("new kernel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := kernel.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown kernel: %v", err)
+		}
+	})
+
+	observe := func(id string) string {
+		pid := integrationPID{id: id}
+		process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, integrationPID]{
+			Input:      []byte(`{"mode":"ambient"}`),
+			Entrypoint: "run",
+			UserData:   pid,
+			Dispatcher: integrationDispatcher{},
+		})
+		if err != nil {
+			t.Fatalf("create process: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := process.Close(context.Background()); err != nil {
+				t.Errorf("close process: %v", err)
+			}
+		})
+		if err := table.SaveProcess(ctx, pid.PID(), process); err != nil {
+			t.Fatalf("save process: %v", err)
+		}
+		handle, err := kernel.Resume(ctx, process)
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		result := <-handle.Results()
+		if result.Status != capcompute.ResumeCompleted {
+			t.Fatalf("status = %s; err = %v; output = %s", result.Status, result.Err, result.Output)
+		}
+		return string(result.Output)
+	}
+
+	first := observe("ambient-1")
+	second := observe("ambient-2")
+	if first != second {
+		t.Fatalf("ambient reads diverged across fresh processes:\n%s\n%s", first, second)
+	}
+}
+
+// Kernel law #1 (no ambient authority): a guest attempting network access
+// through extism:host/env http_request — bypassing the syscall dispatcher —
+// must fail, because the kernel refuses images that set allowed_hosts and the
+// SDK denies requests when none are allowed.
+func TestTinyGoGuestAmbientHTTPIsDenied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TinyGo integration test in short mode")
+	}
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
+	}
+
+	ctx := context.Background()
+	wasmPath := buildTinyGoIntegrationGuest(t)
+	table := memory.NewProcessTable[string, integrationPID]()
+	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
+		Image: extism.Manifest{
+			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
+		},
+		PluginConfig: extism.PluginConfig{EnableWasi: true},
+		ProcessTable: table,
+	})
+	if err != nil {
+		t.Fatalf("new kernel: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := kernel.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown kernel: %v", err)
+		}
+	})
+
+	pid := integrationPID{id: "ambient-http"}
+	process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, integrationPID]{
+		Input:      []byte(`{"mode":"http"}`),
+		Entrypoint: "run",
+		UserData:   pid,
+		Dispatcher: integrationDispatcher{},
+	})
+	if err != nil {
+		t.Fatalf("create process: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := process.Close(context.Background()); err != nil {
+			t.Errorf("close process: %v", err)
+		}
+	})
+	if err := table.SaveProcess(ctx, pid.PID(), process); err != nil {
+		t.Fatalf("save process: %v", err)
+	}
+	handle, err := kernel.Resume(ctx, process)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	result := <-handle.Results()
+	if result.Status != capcompute.ResumeFailed {
+		t.Fatalf("ambient http produced status %s (output %s); want failed", result.Status, result.Output)
+	}
 }
