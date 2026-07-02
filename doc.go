@@ -1,37 +1,38 @@
-// Package capcompute is the root API for running Extism compute guests with
-// host-dispatched capabilities.
+// Package capcompute is the kernel of a small library operating system for
+// Extism compute guests: wasm programs run as processes whose only access to
+// the outside world is host-dispatched syscalls.
 //
-// The package owns compiled plugin lifecycle, session lifecycle, and the
-// guest-to-host callback wiring. Concrete storage, durable reconstruction, and
-// application scheduling stay outside this package.
+// The package owns the compiled program image (Kernel), process lifecycle, and
+// the guest-to-host syscall wiring. Concrete storage, durable reconstruction,
+// and application scheduling stay outside this package.
 //
 // A typical runtime does the following:
-//   - build a ComputeCompiledPlugin with a wasm Manifest and a SessionStore;
-//   - create a Session from a PlayRequest, which carries the session's dispatcher;
-//   - save that Session in the SessionStore before invoking Play if the guest
-//     can call host capabilities;
-//   - call Play and read the single PlayResult from the returned handle;
-//   - close sessions and the compiled plugin at the application boundary.
+//   - build a Kernel with a wasm Manifest and a ProcessTable;
+//   - create a Process from a ProcessSpec, which carries the process's dispatcher;
+//   - save that Process in the ProcessTable before invoking Resume if the guest
+//     can make syscalls;
+//   - call Resume and read the single ResumeResult from the returned handle;
+//   - close processes and the Kernel at the application boundary.
 //
-// Host callbacks receive only the session id through context. The host function
-// loads the Session from SessionStore and dispatches the guest Call through the
-// session dispatcher. This keeps runtime lookup explicit and avoids hidden play
-// state in context.
+// The syscall host function receives only the PID through context. It loads the
+// Process from the ProcessTable and dispatches the guest Syscall through the
+// process dispatcher. This keeps runtime lookup explicit and avoids hidden
+// invocation state in context.
 //
-// Play has four observable outcomes. A successful guest call whose JSON output
-// contains {"status":"yielded"} returns PlayYielded, while an explicit
-// {"status":"completed"} returns PlayCompleted. Missing or unsupported status
-// values return PlayFailed. A stopped invocation returns PlayStopped and
-// permanently terminates that physical session. Guest and runtime errors also
-// return PlayFailed.
+// Resume has four observable outcomes. A successful guest call whose JSON
+// output contains {"status":"yielded"} returns ResumeYielded, while an explicit
+// {"status":"completed"} returns ResumeCompleted. Missing or unsupported status
+// values return ResumeFailed. A stopped invocation returns ResumeStopped and
+// permanently terminates that physical process. Guest and runtime errors also
+// return ResumeFailed.
 //
-// SessionStore is a runtime lookup boundary. Durable stores should persist the
-// data needed by their application to recreate sessions, then hydrate a fresh
-// ComputeCompiledPlugin with CreateSession and SaveSession when a process
-// restarts. CreateSession deliberately does not save sessions; callers decide
-// when a session becomes visible to host callbacks and when it is removed.
+// ProcessTable is a runtime lookup boundary. Durable stores should persist the
+// data needed by their application to recreate processes, then hydrate a fresh
+// Kernel with CreateProcess and SaveProcess when a host process restarts.
+// CreateProcess deliberately does not save processes; callers decide when a
+// process becomes visible to syscalls and when it is removed.
 //
 // The library does not own replay scheduling, async completion, durable journal
-// policy, or session cleanup timing. Those are conventions of the wrapping
+// policy, or process cleanup timing. Those are conventions of the wrapping
 // system using this package.
 package capcompute

@@ -1,6 +1,8 @@
 # AGENTS.md
 
-This repo is the experimental Extism compute runtime.
+This repo is the experimental Extism compute runtime — the kernel of a small
+library operating system (see `docs/ARCHITECTURE.md` for the OS model and its
+invariants).
 
 Write simple Go. Put code where ownership is obvious.
 
@@ -16,16 +18,15 @@ The root package is the library entrypoint.
 
 Root `capcompute` owns:
 
-- `ComputeCompiledPlugin`
+- `Kernel`
 - `Config`
-- `Session`
-- `SessionKey`
-- `SessionStore`
-- `SessionRecord`
-- `PlayRequest`
-- `PlayResult`
-- session lifecycle
-- Extism plugin creation and host callback wiring
+- `Process`
+- `PID`
+- `ProcessTable`
+- `ProcessSpec`
+- `ResumeResult`
+- process lifecycle
+- Extism plugin creation and syscall host-function wiring
 
 Do not add root packages, public packages, examples, or old engine concepts unless
 explicitly asked.
@@ -40,24 +41,24 @@ Current boundaries:
 
 ```text
 capcompute
-  compiled plugin, sessions, SessionStore, Play/Replay lifecycle
+  Kernel (compiled program image), processes, ProcessTable, Resume/Replay lifecycle
 
-dispatcher
+sys
   Dispatcher interface
-  DispatcherFactory interface
-  Call
-  Outcome
+  Syscall
+  SyscallResult
+  Capability, Authorization
 
-dispatcher/replay
+sys/replay
   replay Dispatcher decorator
   Tape interface
 
-dispatcher/replay/tape/journaled
+sys/replay/tape/journaled
   journal-backed Tape implementation
   Journal interface
 
-dispatcher/replay/tape/journaled/journal/memory
-  in-memory Journal implementation
+memory
+  in-memory ProcessTable implementation
 ```
 
 If a type appears in an interface method, it belongs with that interface unless
@@ -70,66 +71,51 @@ Dependencies go downward or sideways to parent boundaries.
 Allowed:
 
 ```text
-capcompute -> dispatcher
-capcompute -> dispatcher/replay
-dispatcher/replay -> dispatcher
-journaled -> dispatcher
-```
-
-Avoid:
-
-```text
-child package -> capcompute
-implementation package -> sibling implementation package
+capcompute -> sys
+capcompute -> sys/replay
+sys/replay -> sys
+journaled -> sys
+memory -> capcompute
 ```
 
 If an import cycle appears, fix ownership. Do not add glue packages to hide it.
 
-## Session Model
+## Process Model
 
-`ComputeCompiledPlugin` owns the session map and active-session exclusivity.
-`SessionStore` is the root-owned persistence boundary for yielded session
-records.
+`Kernel` owns compiled-program instantiation and active-process exclusivity.
+`ProcessTable` is the root-owned lookup boundary for live processes.
 
-`Session` owns:
+`Process` owns:
 
 - guest data
-- original `PlayRequest`
+- original `ProcessSpec` input
 - reusable Extism plugin instance
 - current dispatcher chain
-- yielded call
 
-Context passed into Extism host callbacks carries only the session id.
+Context passed into the syscall host function carries only the PID.
 
-Yielded sessions are retained for replay.
-Completed or failed sessions are finalized and removed.
-
-If a `SessionStore` is configured:
-
-- yielded sessions are saved;
-- completed or failed sessions are deleted;
-- concrete persistent implementations stay outside the root package.
+Yielded processes are retained for replay.
+Completed or failed processes are finalized and removed by the wrapping system.
 
 ## Replay Model
 
 Guest code re-enters from the top.
 
-Replay is another invocation of the same session:
+Replay is another invocation of the same process:
 
-- `Play` creates a dispatcher chain.
-- `Yield` keeps that dispatcher chain in the session.
+- `Resume` runs the process against its dispatcher chain.
+- Yield keeps that dispatcher chain in the process.
 - async completion is handler/journal responsibility.
-- `Replay(ctx, sessionID)` reuses session guest data, request, and dispatcher.
 
-Do not put async completion or journal-writing APIs on `ComputeCompiledPlugin`.
+Do not put async completion or journal-writing APIs on `Kernel`.
 
 Replay dispatcher behavior:
 
 - replay from tape when a record exists;
 - delegate upstream when no record exists;
-- record deterministic `OutcomeResult` and `OutcomeFailed`;
-- reset tape on `OutcomeYield`;
-- do not record `OutcomeYield`.
+- record deterministic `StatusResult` and `StatusFailed`;
+- reset tape on `StatusYield`;
+- do not record `StatusYield`.
 
 ## Package Names
 
@@ -140,7 +126,7 @@ Prefer concrete strategy names:
 ```go
 replay.Dispatcher
 journaled.Tape
-memory.Journal
+memory.ProcessTable
 ```
 
 Avoid:
