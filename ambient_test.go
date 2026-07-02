@@ -53,4 +53,3 @@ func TestDeterministicRandRestartsIdentically(t *testing.T) {
 		t.Fatal("rand produced all zeros")
 	}
 }
-
