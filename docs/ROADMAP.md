@@ -1,12 +1,14 @@
 # Roadmap — improvements that flow from the OS model
 
 Scored follow-ups now that the API speaks the OS vocabulary (see
-`ARCHITECTURE.md` for the model and its invariants). Score = impact on
+`ARCHITECTURE.md` for the model and its invariants, and `RESEARCH.md` for the
+prior-art review behind several items). Score = impact on
 coherence/capability (H/M/L) × effort (S/M/L). The order below is the
 recommended sequence; each item is deliberately small enough to land alone.
 
 | # | Item | Impact | Effort |
 |---|------|--------|--------|
+| 0 | Ambient-surface lockdown (kernel owns guest WASI sources) | H | S |
 | 1 | Journal program-versioning + replay compatibility check | H | S–M |
 | 2 | Kernel-law CI tests (the five invariants as tests) | H | S–M |
 | 3 | Hash-chained journal (tamper-evident audit) | M–H | S |
@@ -15,6 +17,20 @@ recommended sequence; each item is deliberately small enough to land alone.
 | 6 | ABI version field in the syscall envelope | M | S |
 | 7 | Snapshot/checkpoint to bound replay cost | M | L — deferred |
 | 8 | Sources-as-inbound-drivers refactor (aurora-k8s-agent) | M | M — deferred |
+
+## 0. Ambient-surface lockdown
+
+The kernel must own the guest's WASI sources instead of passing them through
+(`RESEARCH.md` finding 1). Today determinism holds only because wazero's
+default fake clock/RNG happen to be deterministic, and `extism:host/env
+http_request` is unusable only because `AllowedHosts` happens to be empty —
+four config fields away from silently breaking the determinism and
+no-ambient-authority laws. Fix: construct the instance `ModuleConfig` inside
+`NewKernel`/`CreateProcess` (pinned rand seed, pinned clocks, no env/args;
+ignore caller-supplied ModuleConfig) and reject manifests with non-empty
+`AllowedHosts`/`AllowedPaths` via a typed error. HTTP and files are
+capabilities, not ambient rights. Extends #2's tests with: grantless guest
+cannot reach HTTP/FS; clock/RNG reads identical across crash-replay.
 
 ## 1. Journal program-versioning + replay compatibility check
 
