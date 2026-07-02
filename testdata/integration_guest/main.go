@@ -9,14 +9,14 @@ import (
 	"github.com/extism/go-pdk"
 )
 
-//go:wasmimport extism:host/compute play
-func hostPlay(uint64) uint64
+//go:wasmimport extism:host/compute syscall
+func hostSyscall(uint64) uint64
 
 type input struct {
 	Mode string `json:"mode"`
 }
 
-type call struct {
+type syscall struct {
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
@@ -42,13 +42,13 @@ func run() int32 {
 
 	switch in.Mode {
 	case "completed":
-		response, err := dispatch(call{Name: "host.echo", Args: json.RawMessage(`{"value":"ok"}`)})
+		response, err := dispatch(syscall{Name: "host.echo", Args: json.RawMessage(`{"value":"ok"}`)})
 		if err != nil {
 			pdk.SetError(err)
 			return 1
 		}
 		if response.Status != "result" {
-			pdk.SetErrorString("expected result outcome")
+			pdk.SetErrorString("expected result status")
 			return 1
 		}
 		if err := pdk.OutputJSON(output{Status: "completed", Observation: response.Result}); err != nil {
@@ -58,13 +58,13 @@ func run() int32 {
 		return 0
 
 	case "yielded":
-		response, err := dispatch(call{Name: "host.yield"})
+		response, err := dispatch(syscall{Name: "host.yield"})
 		if err != nil {
 			pdk.SetError(err)
 			return 1
 		}
 		if response.Status != "yield" {
-			pdk.SetErrorString("expected yield outcome")
+			pdk.SetErrorString("expected yield status")
 			return 1
 		}
 		if err := pdk.OutputJSON(output{Status: "yielded"}); err != nil {
@@ -87,16 +87,16 @@ func run() int32 {
 	}
 }
 
-func dispatch(c call) (hostResponse, error) {
-	data, err := json.Marshal(c)
+func dispatch(sc syscall) (hostResponse, error) {
+	data, err := json.Marshal(sc)
 	if err != nil {
-		return hostResponse{}, fmt.Errorf("encode call: %w", err)
+		return hostResponse{}, fmt.Errorf("encode syscall: %w", err)
 	}
 
 	request := pdk.AllocateBytes(data)
 	defer request.Free()
 
-	responseOffset := hostPlay(request.Offset())
+	responseOffset := hostSyscall(request.Offset())
 	var response hostResponse
 	if err := pdk.JSONFrom(responseOffset, &response); err != nil {
 		return hostResponse{}, fmt.Errorf("decode host response: %w", err)

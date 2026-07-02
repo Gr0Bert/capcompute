@@ -1,27 +1,30 @@
 package capcompute
 
 import (
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
 
 	extism "github.com/extism/go-sdk"
+
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-type sessionKeyContextKey struct{}
+type pidContextKey struct{}
 
 type hostResponse struct {
-	Status  dispatcher.OutcomeKind `json:"status"`
-	Result  json.RawMessage        `json:"result,omitempty"`
-	Message string                 `json:"message,omitempty"`
+	Status  sys.SyscallStatus `json:"status"`
+	Result  json.RawMessage   `json:"result,omitempty"`
+	Message string            `json:"message,omitempty"`
 }
 
-func hostFunction[ID comparable, K SessionKey[ID]](store SessionStore[ID, K]) extism.HostFunction {
+// hostFunction registers the single syscall entry point. Guests import
+// `extism:host/compute syscall`; every host capability flows through it.
+func hostFunction[ID comparable, K PID[ID]](table ProcessTable[ID, K]) extism.HostFunction {
 	host := extism.NewHostFunctionWithStack(
-		"play",
+		"syscall",
 		func(ctx context.Context, plugin *extism.CurrentPlugin, stack []uint64) {
-			stack[0] = dispatchHostCall(ctx, store, plugin, stack[0])
+			stack[0] = dispatchSyscall(ctx, table, plugin, stack[0])
 		},
 		[]extism.ValueType{extism.ValueTypePTR},
 		[]extism.ValueType{extism.ValueTypePTR},
@@ -30,42 +33,42 @@ func hostFunction[ID comparable, K SessionKey[ID]](store SessionStore[ID, K]) ex
 	return host
 }
 
-func dispatchHostCall[ID comparable, K SessionKey[ID]](
+func dispatchSyscall[ID comparable, K PID[ID]](
 	ctx context.Context,
-	store SessionStore[ID, K],
+	table ProcessTable[ID, K],
 	plugin *extism.CurrentPlugin,
 	offset uint64,
 ) uint64 {
-	sessionKey, ok := ctx.Value(sessionKeyContextKey{}).(ID)
+	pid, ok := ctx.Value(pidContextKey{}).(ID)
 	if !ok {
-		return returnToGuest(plugin, hostResponse{Status: dispatcher.OutcomeFailed, Message: "session key missing from context"})
+		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: "pid missing from context"})
 	}
-	session, err := store.LoadSession(ctx, sessionKey)
+	process, err := table.LoadProcess(ctx, pid)
 	if err != nil {
-		return returnToGuest(plugin, hostResponse{Status: dispatcher.OutcomeFailed, Message: "session not found"})
+		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: "process not found"})
 	}
-	rawCall, err := plugin.ReadBytes(offset)
+	rawSyscall, err := plugin.ReadBytes(offset)
 	if err != nil {
-		return returnToGuest(plugin, hostResponse{Status: dispatcher.OutcomeFailed, Message: fmt.Errorf("read raw call: %w", err).Error()})
+		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: fmt.Errorf("read raw syscall: %w", err).Error()})
 	}
 
-	var call dispatcher.Call
-	if err := json.Unmarshal(rawCall, &call); err != nil {
-		return returnToGuest(plugin, hostResponse{Status: dispatcher.OutcomeFailed, Message: fmt.Errorf("decode call: %w", err).Error()})
+	var syscall sys.Syscall
+	if err := json.Unmarshal(rawSyscall, &syscall); err != nil {
+		return returnToGuest(plugin, hostResponse{Status: sys.StatusFailed, Message: fmt.Errorf("decode syscall: %w", err).Error()})
 	}
 
-	outcome, err := session.dispatcher.Dispatch(ctx, session.GuestData, call, dispatcher.Authorization{})
+	result, err := process.dispatcher.Dispatch(ctx, process.GuestData, syscall, sys.Authorization{})
 	if err != nil {
 		return returnToGuest(plugin, hostResponse{
-			Status:  dispatcher.OutcomeFailed,
+			Status:  sys.StatusFailed,
 			Message: err.Error(),
 		})
 	}
 
 	return returnToGuest(plugin, hostResponse{
-		Status:  outcome.Kind(),
-		Result:  outcome.Result(),
-		Message: outcome.Message(),
+		Status:  result.Status(),
+		Result:  result.Result(),
+		Message: result.Message(),
 	})
 }
 

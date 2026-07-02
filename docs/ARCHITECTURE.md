@@ -30,43 +30,45 @@ open, port it from that prior art rather than reinventing it.
 
 ## Glossary (code name → OS concept → contract)
 
-The left column is the current code; the middle is the OS concept it *is*; the
-right is the promise the name makes. Renames adopt the OS name **only where the
-thing honors that concept's contract** — never introduce a false friend
-(no `Thread`: there is no preemption; no `Interrupt`: yields are cooperative).
+The left column is the code (the OS vocabulary is now the API, as of the
+rename pass); the middle is the OS concept it *is*; the right is the promise
+the name makes. A name adopts an OS term **only where the thing honors that
+concept's contract** — never introduce a false friend (no `Thread`: there is
+no preemption; no `Interrupt`: yields are cooperative).
 
-| Code today | OS concept | Contract |
+| Code | OS concept | Contract |
 |---|---|---|
-| `ComputeCompiledPlugin` | **Kernel** (bound to one program image) | owns the process table, wires the syscall entry, spawns processes |
+| `Kernel` | **Kernel** (bound to one program image) | owns the process table, wires the syscall entry, spawns processes |
 | wasm module ("brain") | **Program** (executable image) | on-disk code; many processes may run one program |
-| `Session` | **Process** | one running instance; states idle/active/terminated ≈ ready/running/terminated |
-| `SessionKey` / `.SessionKey()` | **PID** | stable, deterministic process identity |
-| `SessionStore` (`LoadSession`/`SaveSession`) | **Process table** | the kernel's lookup boundary for live processes |
-| `Play` / `PlayRequest` / `PlayResult` / `PlayHandle` | **Run / schedule a quantum** | give a process CPU; outcome is yielded/completed/stopped/failed |
-| `dispatcher.Call{Name,Args}` | **Syscall** (request) | the guest→host request crossing the trap boundary |
-| `dispatcher.Outcome{result\|yield\|failed}` | **Syscall result** | the value/effect returned to the guest |
-| `dispatcher.Capability` | **Capability** | keep the name — already the exact security term |
-| `dispatcher.Authorization` | **Grant / approval context** | forward-propagated authority for a replayed action |
-| `dispatcher.Dispatcher` | **Syscall handler / driver interface** | turns a `Call` into an `Outcome`; lists `Capabilities()` |
+| `Process` | **Process** | one running instance; states idle/active/terminated ≈ ready/running/terminated |
+| `PID` interface / `.PID()` | **PID** | stable, deterministic process identity (same type/method-name pattern as Go's `error`) |
+| `ProcessTable` (`LoadProcess`/`SaveProcess`) | **Process table** | the kernel's lookup boundary for live processes |
+| `Resume` / `ProcessSpec` / `ResumeResult` / `ResumeHandle` | **Schedule a quantum** | give a process CPU until it yields/completes/stops/fails (cooperative) |
+| `sys.Syscall{Name,Args}` | **Syscall** (request) | the guest→host request crossing the trap boundary |
+| `sys.SyscallResult{result\|yield\|failed}` | **Syscall result** | the value/effect returned to the guest |
+| `sys.Capability` | **Capability** | the exact capability-security term |
+| `sys.Authorization` | **Grant / approval context** | forward-propagated authority for a replayed action |
+| `sys.Dispatcher` | **Syscall dispatcher / driver interface** | turns a `Syscall` into a `SyscallResult`; lists `Capabilities()` |
 | concrete dispatchers (`aurora-dispatchers`) | **Drivers** (outbound) | mediate a process's I/O to external devices |
 | chat sources (Telegram/Slack) | **Drivers** (inbound) + **controlling terminal** | see *Drivers: the symmetry* |
-| replay journal / tape | **Journal** (WAL) | append-only log = durability + audit (one structure, two jobs) |
+| `journaled.Record{Syscall,Result}` tape | **Journal** (WAL) | append-only log = durability + audit (one structure, two jobs) |
 
-> Package note: do **not** name a package `syscall` (shadows Go's stdlib). Use
-> `abi`, `sys`, or fold syscall types into a `kernel` package.
+> Package note: the syscall vocabulary lives in package `sys`, not `syscall`
+> (which would shadow Go's stdlib).
 
 ## The syscall ABI
 
 The guest↔host boundary is a single Extism host function, namespace
-`extism:host/compute`, function `play`. The guest emits a `Call`; the kernel loads
-the current process from the process table (by PID carried in context), dispatches
-the `Call` through that process's driver chain, and returns an `Outcome`.
+`extism:host/compute`, function `syscall`. The guest emits a `Syscall`; the
+kernel loads the current process from the process table (by PID carried in
+context), dispatches the `Syscall` through that process's driver chain, and
+returns a `SyscallResult`.
 
 ```
-Syscall  (Call):    { "name": string, "args": <json> }
-Result   (Outcome): { "status": "result" | "yield" | "failed",
-                      "result": <json>,   // when result
-                      "message": string } // when yield/failed
+Syscall:       { "name": string, "args": <json> }
+SyscallResult: { "status": "result" | "yield" | "failed",
+                 "result": <json>,   // when result
+                 "message": string } // when yield/failed
 ```
 
 Guest programs return `{"status":"completed",...}` or `{"status":"yielded"}` from
@@ -144,13 +146,13 @@ Agents creating agents is the **`spawn` syscall**. Design decisions, with prior 
   journaling every inter-process message as an ordered input event (actor model +
   event sourcing), a real determinism cost to pay only when concurrency is needed.
 - **Two host-side contracts, not just the guest ABI:** (a) *scheduler hand-off* —
-  `spawn`'s host handler enqueues the new `Session` into the wrapping runtime's
+  `spawn`'s host handler enqueues the new `Process` into the wrapping runtime's
   queue (scheduling lives in userland, by design); (b) *supervision* — decide
   cascade-kill vs orphan-adopt on parent `Stop`. Study Erlang/OTP supervision trees
   before this grows.
 
-Implementation sketch: a new `dispatcher.Call` (`process.spawn`) handled by a
-builtin driver whose handler calls `CreateSession` + `SaveSession`, drives or
+Implementation sketch: a new `sys.Syscall` (`process.spawn`) handled by a
+builtin driver whose handler calls `CreateProcess` + `SaveProcess`, drives or
 enqueues the child, and commits the child's result into the parent's replay tape.
 
 ## Persistence and replay

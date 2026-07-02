@@ -1,9 +1,6 @@
 package capcompute_test
 
 import (
-	"github.com/aurora-capcompute/capcompute/memory"
-	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,32 +12,36 @@ import (
 	"time"
 
 	extism "github.com/extism/go-sdk"
+
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/memory"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-type integrationSessionKey struct {
+type integrationPID struct {
 	id string
 }
 
-func (k integrationSessionKey) SessionKey() string {
+func (k integrationPID) PID() string {
 	return k.id
 }
 
 type integrationDispatcher struct{}
 
-func (integrationDispatcher) Dispatch(_ context.Context, _ integrationSessionKey, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
-	switch call.Name {
+func (integrationDispatcher) Dispatch(_ context.Context, _ integrationPID, syscall sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
 	case "host.echo":
-		return dispatcher.Result(json.RawMessage(`{"echoed":true}`)), nil
+		return sys.Result(json.RawMessage(`{"echoed":true}`)), nil
 	case "host.yield":
-		return dispatcher.Yield("waiting for outside work"), nil
+		return sys.Yield("waiting for outside work"), nil
 	default:
-		return dispatcher.Outcome{}, errors.New("unknown call")
+		return sys.SyscallResult{}, errors.New("unknown syscall")
 	}
 }
 
-func (integrationDispatcher) Capabilities() []dispatcher.Capability { return nil }
+func (integrationDispatcher) Capabilities() []sys.Capability { return nil }
 
-func TestTinyGoGuestPlayStates(t *testing.T) {
+func TestTinyGoGuestResumeStates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TinyGo integration test in short mode")
 	}
@@ -50,36 +51,36 @@ func TestTinyGoGuestPlayStates(t *testing.T) {
 
 	ctx := context.Background()
 	wasmPath := buildTinyGoIntegrationGuest(t)
-	store := memory.NewSessionStore[string, integrationSessionKey]()
-	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationSessionKey](ctx, capcompute.Config[string, integrationSessionKey]{
+	table := memory.NewProcessTable[string, integrationPID]()
+	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
 		},
 		PluginConfig: extism.PluginConfig{
 			EnableWasi: true,
 		},
-		SessionStore: store,
+		ProcessTable: table,
 	})
 	if err != nil {
-		t.Fatalf("new compute plugin: %v", err)
+		t.Fatalf("new kernel: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := compute.CloseCompiled(context.Background()); err != nil {
-			t.Errorf("close compiled plugin: %v", err)
+		if err := kernel.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown kernel: %v", err)
 		}
 	})
 
 	tests := []struct {
 		name string
-		want capcompute.PlayStatus
+		want capcompute.ResumeStatus
 	}{
-		{name: "completed", want: capcompute.PlayCompleted},
-		{name: "yielded", want: capcompute.PlayYielded},
-		{name: "failed", want: capcompute.PlayFailed},
+		{name: "completed", want: capcompute.ResumeCompleted},
+		{name: "yielded", want: capcompute.ResumeYielded},
+		{name: "failed", want: capcompute.ResumeFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessionKey := integrationSessionKey{id: "run-" + tt.name}
+			pid := integrationPID{id: "run-" + tt.name}
 			input, err := json.Marshal(struct {
 				Mode string `json:"mode"`
 			}{
@@ -88,38 +89,38 @@ func TestTinyGoGuestPlayStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("encode input: %v", err)
 			}
-			session, err := compute.CreateSession(ctx, capcompute.PlayRequest[string, integrationSessionKey]{
+			process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, integrationPID]{
 				Input:      input,
 				Entrypoint: "run",
-				UserData:   sessionKey,
+				UserData:   pid,
 				Dispatcher: integrationDispatcher{},
 			})
 			if err != nil {
-				t.Fatalf("create session: %v", err)
+				t.Fatalf("create process: %v", err)
 			}
 			t.Cleanup(func() {
-				if err := session.Close(context.Background()); err != nil {
-					t.Errorf("close session: %v", err)
+				if err := process.Close(context.Background()); err != nil {
+					t.Errorf("close process: %v", err)
 				}
 			})
 
-			if err := store.SaveSession(ctx, sessionKey.SessionKey(), session); err != nil {
-				t.Fatalf("save session: %v", err)
+			if err := table.SaveProcess(ctx, pid.PID(), process); err != nil {
+				t.Fatalf("save process: %v", err)
 			}
 
-			handle, err := compute.Play(ctx, session)
+			handle, err := kernel.Resume(ctx, process)
 			if err != nil {
-				t.Fatalf("play: %v", err)
+				t.Fatalf("resume: %v", err)
 			}
 			result := <-handle.Results()
 			if result.Status != tt.want {
 				t.Fatalf("status = %s, want %s; err = %v; output = %s", result.Status, tt.want, result.Err, result.Output)
 			}
-			if tt.want == capcompute.PlayFailed && result.Err == nil {
-				t.Fatal("failed play returned nil error")
+			if tt.want == capcompute.ResumeFailed && result.Err == nil {
+				t.Fatal("failed resume returned nil error")
 			}
-			if tt.want != capcompute.PlayFailed && result.Err != nil {
-				t.Fatalf("play error: %v", result.Err)
+			if tt.want != capcompute.ResumeFailed && result.Err != nil {
+				t.Fatalf("resume error: %v", result.Err)
 			}
 		})
 	}
@@ -135,26 +136,26 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 
 	ctx := context.Background()
 	wasmPath := buildTinyGoIntegrationGuest(t)
-	store := memory.NewSessionStore[string, integrationSessionKey]()
-	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationSessionKey](ctx, capcompute.Config[string, integrationSessionKey]{
+	table := memory.NewProcessTable[string, integrationPID]()
+	kernel, err := capcompute.NewKernel[string, integrationPID](ctx, capcompute.Config[string, integrationPID]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
 		},
 		PluginConfig: extism.PluginConfig{
 			EnableWasi: true,
 		},
-		SessionStore: store,
+		ProcessTable: table,
 	})
 	if err != nil {
-		t.Fatalf("new compute plugin: %v", err)
+		t.Fatalf("new kernel: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := compute.CloseCompiled(context.Background()); err != nil {
-			t.Errorf("close compiled plugin: %v", err)
+		if err := kernel.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown kernel: %v", err)
 		}
 	})
 
-	sessionKey := integrationSessionKey{id: "run-stopped"}
+	pid := integrationPID{id: "run-stopped"}
 	input, err := json.Marshal(struct {
 		Mode string `json:"mode"`
 	}{
@@ -163,30 +164,30 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode input: %v", err)
 	}
-	session, err := compute.CreateSession(ctx, capcompute.PlayRequest[string, integrationSessionKey]{
+	process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, integrationPID]{
 		Input:      input,
 		Entrypoint: "run",
-		UserData:   sessionKey,
+		UserData:   pid,
 		Dispatcher: integrationDispatcher{},
 	})
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("create process: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := session.Close(context.Background()); err != nil {
-			t.Errorf("close session: %v", err)
+		if err := process.Close(context.Background()); err != nil {
+			t.Errorf("close process: %v", err)
 		}
 	})
-	if err := store.SaveSession(ctx, sessionKey.SessionKey(), session); err != nil {
-		t.Fatalf("save session: %v", err)
+	if err := table.SaveProcess(ctx, pid.PID(), process); err != nil {
+		t.Fatalf("save process: %v", err)
 	}
 
-	handle, err := compute.Play(ctx, session)
+	handle, err := kernel.Resume(ctx, process)
 	if err != nil {
-		t.Fatalf("play: %v", err)
+		t.Fatalf("resume: %v", err)
 	}
-	if _, err := compute.Play(ctx, session); err != capcompute.ErrSessionActive {
-		t.Fatalf("concurrent play error = %v, want ErrSessionActive", err)
+	if _, err := kernel.Resume(ctx, process); err != capcompute.ErrProcessActive {
+		t.Fatalf("concurrent resume error = %v, want ErrProcessActive", err)
 	}
 
 	handle.Stop()
@@ -195,21 +196,21 @@ func TestTinyGoGuestCanBeStopped(t *testing.T) {
 	results := handle.Results()
 	select {
 	case result := <-results:
-		if result.Status != capcompute.PlayStopped {
-			t.Fatalf("status = %s, want %s; err = %v", result.Status, capcompute.PlayStopped, result.Err)
+		if result.Status != capcompute.ResumeStopped {
+			t.Fatalf("status = %s, want %s; err = %v", result.Status, capcompute.ResumeStopped, result.Err)
 		}
 		if !errors.Is(result.Err, context.Canceled) {
 			t.Fatalf("error = %v, want context canceled", result.Err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("stopped play did not return")
+		t.Fatal("stopped resume did not return")
 	}
 	if _, ok := <-results; ok {
-		t.Fatal("stopped play returned more than one result")
+		t.Fatal("stopped resume returned more than one result")
 	}
 
-	if _, err := compute.Play(ctx, session); err != capcompute.ErrSessionTerminated {
-		t.Fatalf("replay error = %v, want ErrSessionTerminated", err)
+	if _, err := kernel.Resume(ctx, process); err != capcompute.ErrProcessTerminated {
+		t.Fatalf("resume error = %v, want ErrProcessTerminated", err)
 	}
 }
 

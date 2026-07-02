@@ -1,33 +1,38 @@
 # capcompute
 
-`capcompute` is an experimental Extism-based compute runtime library.
+`capcompute` is an experimental Extism-based compute runtime library — the
+kernel of a small library operating system in which WebAssembly guests run as
+processes and host capabilities are syscalls.
 
 It gives a Go application a small, explicit way to run WebAssembly guests that
 can call back into host-owned capabilities. The library owns the Extism plugin
-lifecycle and the host callback wiring. The application owns scheduling,
-persistence policy, replay policy, queues, durable state, and cleanup timing.
+lifecycle and the syscall wiring. The application owns scheduling, persistence
+policy, replay policy, queues, durable state, and cleanup timing.
 
 The intended use case is a higher-level runtime for systems such as AI agents,
 controllers, and workflow-like applications where guest code can request host
-work, yield, and later be invoked again by the wrapping system.
+work, yield, and later be resumed by the wrapping system.
+
+See `docs/ARCHITECTURE.md` for the OS model this library implements.
 
 ## What This Library Owns
 
 The root `capcompute` package owns:
 
-- compiled Extism plugin creation;
-- per-session Extism plugin instances;
-- the `Session`, `SessionKey`, and `SessionStore` vocabulary;
-- the `PlayRequest` and `PlayResult` lifecycle;
-- the `extism:host/compute/play` host callback;
-- lookup of the current session from the configured `SessionStore`;
-- dispatching guest host calls into a `dispatcher.Dispatcher`.
+- compiled program images (`Kernel`);
+- per-run process instances (`Process`);
+- the `Process`, `PID`, and `ProcessTable` vocabulary;
+- the `ProcessSpec` and `ResumeResult` lifecycle;
+- the `extism:host/compute/syscall` host function;
+- lookup of the current process from the configured `ProcessTable`;
+- dispatching guest syscalls into a `sys.Dispatcher`.
 
 Child packages own concrete implementations and optional strategies:
 
-- `dispatcher` defines `Call`, `Outcome`, and `Dispatcher`;
-- `dispatcher/replay` provides a replay dispatcher decorator;
-- `dispatcher/replay/tape/journaled` provides a journal-backed replay tape.
+- `sys` defines `Syscall`, `SyscallResult`, and `Dispatcher`;
+- `sys/replay` provides a replay dispatcher decorator;
+- `sys/replay/tape/journaled` provides a journal-backed replay tape;
+- `memory` provides an in-memory `ProcessTable` for tests and development.
 
 ## What This Library Does Not Own
 
@@ -35,12 +40,12 @@ Child packages own concrete implementations and optional strategies:
 
 - job queues or schedulers;
 - async completion;
-- when a yielded session should resume;
+- when a yielded process should resume;
 - what value is injected back into guest logic after outside work completes;
 - durable database implementations;
-- when sessions are saved, deleted, or closed;
+- when processes are saved, deleted, or closed;
 - product-specific workflow, agent, or controller policy;
-- plugin distribution or marketplace concerns.
+- program distribution or marketplace concerns.
 
 Those belong to the system wrapping this library.
 
@@ -48,94 +53,92 @@ Those belong to the system wrapping this library.
 
 A host application usually does this:
 
-1. Create a `ComputeCompiledPlugin` with an Extism manifest, a dispatcher
-   factory, and a session store.
-2. Create a `Session` from a `PlayRequest`.
-3. Save the session in the `SessionStore` before calling `Play` if the guest can
-   call host capabilities.
-4. Call `Play`.
-5. Read the single `PlayResult` from the returned handle's result channel.
-6. Decide whether to save, keep, delete, recreate, or close the session.
+1. Create a `Kernel` with an Extism manifest, a dispatcher factory, and a
+   process table.
+2. Create a `Process` from a `ProcessSpec`.
+3. Save the process in the `ProcessTable` before calling `Resume` if the guest
+   can make syscalls.
+4. Call `Resume`.
+5. Read the single `ResumeResult` from the returned handle's result channel.
+6. Decide whether to save, keep, delete, recreate, or close the process.
 
-`CreateSession` does not save anything. This is intentional. The caller decides
-when a session becomes visible to host callbacks.
+`CreateProcess` does not save anything. This is intentional. The caller decides
+when a process becomes visible to syscalls.
 
-`Play` invokes the configured entrypoint on the session's reusable Extism plugin
-instance. It returns a `PlayHandle` because execution happens in a goroutine.
-Each handle sends exactly one `PlayResult` and then closes its result channel.
-Calling `Stop` interrupts the invocation and permanently terminates that physical
-session instance.
+`Resume` invokes the configured entrypoint on the process's reusable Extism
+plugin instance. It returns a `ResumeHandle` because execution happens in a
+goroutine. Each handle sends exactly one `ResumeResult` and then closes its
+result channel. Calling `Stop` interrupts the invocation and permanently
+terminates that physical process instance.
 
-Calling `Play` again on a stopped session returns `ErrSessionTerminated`.
-Recreate the logical run with `CreateSession`, the same request and session key,
-then replace the old session in the store. A replay dispatcher can reuse
-previously committed outcomes from the same journal. The capability call that
-was active during cancellation may execute again because it had no committed
-outcome.
+Calling `Resume` again on a stopped process returns `ErrProcessTerminated`.
+Recreate the logical run with `CreateProcess`, the same spec and PID, then
+replace the old process in the table. A replay dispatcher can reuse previously
+committed results from the same journal. The syscall that was active during
+cancellation may execute again because it had no committed result.
 
 Journal-backed replay records deterministic result and failed outcomes. Yield
 is never committed. Dispatchers should return a Go error for cancellation or
 other transient infrastructure failures that must be retried rather than
-returning a deterministic failed outcome.
+returning a deterministic failed result.
 
-## Session Model
+## Process Model
 
-`Session` is the runtime object for one logical run. It contains:
+`Process` is the runtime object for one logical run. It contains:
 
 - user-owned guest data;
 - the original JSON input;
 - the entrypoint to call;
 - the Extism plugin instance;
-- the dispatcher chain for host calls.
+- the dispatcher chain for syscalls.
 
-`Session` is not thread-safe. A wrapping runtime should coordinate concurrent
-use of the same session.
+`Process` is not thread-safe. A wrapping runtime should coordinate concurrent
+use of the same process.
 
-`SessionKey` is implemented by user data:
+`PID` is implemented by user data:
 
 ```go
 type Run struct {
 	ID string
 }
 
-func (r Run) SessionKey() string {
+func (r Run) PID() string {
 	return r.ID
 }
 ```
 
-The session key is the only tracking value carried through callback context.
-Host callbacks use it to load the current session from `SessionStore`.
+The PID is the only tracking value carried through syscall context. The syscall
+host function uses it to load the current process from the `ProcessTable`.
 
-## SessionStore
+## ProcessTable
 
-`SessionStore` is the runtime lookup boundary:
+`ProcessTable` is the runtime lookup boundary:
 
 ```go
-type SessionStore[ID comparable, K SessionKey[ID]] interface {
-	LoadSession(ctx context.Context, sessionID ID) (*Session[K], error)
-	SaveSession(ctx context.Context, sessionID ID, session *Session[K]) error
+type ProcessTable[ID comparable, K PID[ID]] interface {
+	LoadProcess(ctx context.Context, pid ID) (*Process[K], error)
+	SaveProcess(ctx context.Context, pid ID, process *Process[K]) error
 }
 ```
 
-The store owns session visibility. If a guest calls the host callback and the
-session is not in the store, the callback returns a failed host response.
+The table owns process visibility. If a guest makes a syscall and the process
+is not in the table, the syscall returns a failed host response.
 
-The library ships no concrete store; the application supplies a `SessionStore`
-— an in-memory map in tests, a durable store in production. A durable store can
-persist the application data needed to recreate sessions, then hydrate a new
-`ComputeCompiledPlugin` after process restart by calling `CreateSession` and
-`SaveSession` for each persistent session.
+The library ships an in-memory table in `memory`; the application supplies a
+durable one in production. A durable table can persist the application data
+needed to recreate processes, then hydrate a new `Kernel` after a host restart
+by calling `CreateProcess` and `SaveProcess` for each persistent process.
 
-## Host Callback Contract
+## Syscall Contract
 
 Guests call this imported function:
 
 ```go
-//go:wasmimport extism:host/compute play
-func hostPlay(uint64) uint64
+//go:wasmimport extism:host/compute syscall
+func hostSyscall(uint64) uint64
 ```
 
-The argument points to JSON matching `dispatcher.Call`:
+The argument points to JSON matching `sys.Syscall`:
 
 ```json
 {
@@ -144,12 +147,12 @@ The argument points to JSON matching `dispatcher.Call`:
 }
 ```
 
-The host callback:
+The syscall host function:
 
-1. reads the session id from context;
-2. loads the session from `SessionStore`;
-3. decodes the `dispatcher.Call`;
-4. calls the session dispatcher;
+1. reads the PID from context;
+2. loads the process from `ProcessTable`;
+3. decodes the `sys.Syscall`;
+4. calls the process dispatcher;
 5. returns a JSON host response to the guest.
 
 The host response has this shape:
@@ -163,56 +166,57 @@ The host response has this shape:
 
 `status` is one of:
 
-- `result`: the host call completed and returned JSON;
+- `result`: the syscall completed and returned JSON;
 - `yield`: the host needs outside work before the guest can make progress;
-- `failed`: the host call failed.
+- `failed`: the syscall failed.
 
-The guest decides what to do with that response. In particular, a host
-`yield` outcome does not automatically pause the guest. The guest must return
-from its exported function with the play-result convention described below.
+The guest decides what to do with that response. In particular, a host `yield`
+does not automatically pause the guest. The guest must return from its exported
+function with the resume-result convention described below.
 
-## Play Result Convention
+## Resume Result Convention
 
-`PlayResult.Status` is derived from the Extism call result:
+`ResumeResult.Status` is derived from the Extism call result:
 
-- `PlayFailed`: the guest call returned an Extism/runtime error;
-- `PlayStopped`: the play context was cancelled and the physical session was
-  terminated;
-- `PlayYielded`: the guest succeeded and returned JSON with
+- `ResumeFailed`: the guest call returned an Extism/runtime error;
+- `ResumeStopped`: the resume context was cancelled and the physical process
+  was terminated;
+- `ResumeYielded`: the guest succeeded and returned JSON with
   `{"status":"yielded"}`;
-- `PlayCompleted`: the guest succeeded and returned JSON with
+- `ResumeCompleted`: the guest succeeded and returned JSON with
   `{"status":"completed"}`;
-- `PlayFailed`: the guest output was not valid JSON or did not contain one of
+- `ResumeFailed`: the guest output was not valid JSON or did not contain one of
   those two explicit statuses.
 
-This convention keeps the library minimal. Yielding only means "this play
+This convention keeps the library minimal. Yielding only means "this resume
 attempt stopped at a point chosen by the guest." The wrapping system decides
-when to invoke the session again and what data should be available when it does.
+when to resume the process again and what data should be available when it
+does.
 
 ## Minimal Host Setup
 
 ```go
 ctx := context.Background()
-// store is any SessionStore[string, Run] the application provides (an in-memory
-// map in tests, a durable store in production).
-store := newSessionStore()
+// table is any ProcessTable[string, Run] the application provides (memory.NewProcessTable
+// in tests, a durable table in production).
+table := memory.NewProcessTable[string, Run]()
 
-compute, err := capcompute.NewComputeCompiledPlugin[string, Run](ctx, capcompute.Config[string, Run]{
+kernel, err := capcompute.NewKernel[string, Run](ctx, capcompute.Config[string, Run]{
 	Manifest: extism.Manifest{
 		Wasm: []extism.Wasm{extism.WasmFile{Path: "plugin.wasm"}},
 	},
 	PluginConfig: extism.PluginConfig{
 		EnableWasi: true,
 	},
-	SessionStore: store,
+	ProcessTable: table,
 })
 if err != nil {
 	return err
 }
-defer compute.CloseCompiled(ctx)
+defer kernel.Shutdown(ctx)
 
 run := Run{ID: "run-1"}
-session, err := compute.CreateSession(ctx, capcompute.PlayRequest[string, Run]{
+process, err := kernel.CreateProcess(ctx, capcompute.ProcessSpec[string, Run]{
 	Input:      json.RawMessage(`{"task":"example"}`),
 	Entrypoint: "run",
 	UserData:   run,
@@ -221,76 +225,76 @@ session, err := compute.CreateSession(ctx, capcompute.PlayRequest[string, Run]{
 if err != nil {
 	return err
 }
-defer session.Close(ctx)
+defer process.Close(ctx)
 
-if err := store.SaveSession(ctx, run.SessionKey(), session); err != nil {
+if err := table.SaveProcess(ctx, run.PID(), process); err != nil {
 	return err
 }
 
-handle, err := compute.Play(ctx, session)
+handle, err := kernel.Resume(ctx, process)
 if err != nil {
 	return err
 }
 
 result := <-handle.Results()
 switch result.Status {
-case capcompute.PlayCompleted:
-	// The guest finished this play attempt.
-case capcompute.PlayYielded:
+case capcompute.ResumeCompleted:
+	// The guest finished this resume attempt.
+case capcompute.ResumeYielded:
 	// Keep or persist enough state for the wrapping system to resume later.
-case capcompute.PlayStopped:
-	// Recreate the session before replaying this logical run.
-case capcompute.PlayFailed:
+case capcompute.ResumeStopped:
+	// Recreate the process before resuming this logical run.
+case capcompute.ResumeFailed:
 	// Inspect result.Err and apply application error policy.
 }
 ```
 
-The dispatcher is application code, supplied per session through
-`PlayRequest.Dispatcher`. It handles one session's guest host calls:
+The dispatcher is application code, supplied per process through
+`ProcessSpec.Dispatcher`. It handles one process's syscalls:
 
 ```go
 type runDispatcher struct{}
 
-func (runDispatcher) Dispatch(ctx context.Context, run Run, call dispatcher.Call) (dispatcher.Outcome, error) {
-	switch call.Name {
+func (runDispatcher) Dispatch(ctx context.Context, run Run, syscall sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+	switch syscall.Name {
 	case "echo":
-		return dispatcher.Result(call.Args), nil
+		return sys.Result(syscall.Args), nil
 	case "wait":
-		return dispatcher.Yield("waiting for outside work"), nil
+		return sys.Yield("waiting for outside work"), nil
 	default:
-		return dispatcher.Failed("unknown call"), nil
+		return sys.Fail("unknown syscall"), nil
 	}
 }
+
+func (runDispatcher) Capabilities() []sys.Capability { return nil }
 ```
 
-Dispatchers may optionally implement `dispatcher.CapabilityProvider` to expose
-guest-callable operation metadata. `dispatcher.WithCapabilities` decorates an
-existing dispatcher without changing its dispatch behavior. Replay dispatchers
-forward capability metadata from their wrapped dispatcher, and
-`Session.Capabilities()` returns the capabilities of the exact session chain.
+Replay dispatchers forward capability metadata from their wrapped dispatcher,
+and `Process.Capabilities()` returns the capabilities of the exact process
+chain.
 
 ## Guest Convention
 
 Guests are normal Extism plugins. A Go/TinyGo guest can use
 `github.com/extism/go-pdk`.
 
-The guest imports `extism:host/compute/play`, sends `dispatcher.Call` JSON, reads
-the host response, and then either continues, returns a completed output, returns
-`{"status":"yielded"}`, or sets an Extism error.
+The guest imports `extism:host/compute/syscall`, sends `sys.Syscall` JSON,
+reads the host response, and then either continues, returns a completed output,
+returns `{"status":"yielded"}`, or sets an Extism error.
 
 The integration fixture in `testdata/integration_guest` shows the smallest Go
-guest that exercises completed, yielded, and failed play states.
+guest that exercises completed, yielded, and failed resume states.
 
 ## Replay
 
 Replay is modeled as dispatcher behavior, not as a separate root lifecycle
 method. Guest code re-enters from the top. A replay dispatcher can serve
-recorded outcomes from a tape and delegate new calls upstream when the tape does
-not contain a matching record.
+recorded results from a tape and delegate new syscalls upstream when the tape
+does not contain a matching record.
 
 The root package does not decide when replay happens or when async work is
 complete. A wrapping runtime can build that policy by choosing the dispatcher
-chain it creates for a session.
+chain it creates for a process.
 
 ## Testing
 

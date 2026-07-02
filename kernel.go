@@ -1,0 +1,340 @@
+package capcompute
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sync"
+
+	extism "github.com/extism/go-sdk"
+	"github.com/tetratelabs/wazero"
+
+	"github.com/aurora-capcompute/capcompute/sys"
+)
+
+var (
+	ErrInvalidGuestOutput   = errors.New("invalid guest output")
+	ErrProcessActive        = errors.New("process is already active")
+	ErrProcessRequired      = errors.New("process is required")
+	ErrProcessTableRequired = errors.New("process table is required")
+	ErrProcessTerminated    = errors.New("process is terminated")
+)
+
+// PID lets user-owned run data expose the stable process identity used for
+// process maps. (Compare Go's stdlib `error` interface: the type and its one
+// method share a name.)
+type PID[ID comparable] interface {
+	PID() ID
+}
+
+// Config contains everything needed to compile a program and create per-run instances.
+type Config[ID comparable, K PID[ID]] struct {
+	Manifest       extism.Manifest
+	PluginConfig   extism.PluginConfig
+	InstanceConfig extism.PluginInstanceConfig
+	ProcessTable   ProcessTable[ID, K]
+}
+
+// Kernel owns one compiled program image and spawns processes from it.
+type Kernel[ID comparable, K PID[ID]] struct {
+	compiled       *extism.CompiledPlugin
+	processTable   ProcessTable[ID, K]
+	instanceConfig extism.PluginInstanceConfig
+}
+
+// Process owns the reusable Extism plugin instance for one PID.
+// Process state is not thread-safe; callers coordinate concurrent use.
+type Process[K any] struct {
+	GuestData  K
+	Input      json.RawMessage
+	Entrypoint string
+	plugin     *extism.Plugin
+	dispatcher sys.Dispatcher[K]
+	state      processState
+}
+
+// Capabilities returns the operations exposed by this process's dispatcher.
+func (process *Process[K]) Capabilities() []sys.Capability {
+	if process == nil {
+		return nil
+	}
+	return process.dispatcher.Capabilities()
+}
+
+type processStatus uint8
+
+const (
+	processIdle processStatus = iota
+	processActive
+	processTerminated
+)
+
+type processState struct {
+	mu     sync.Mutex
+	status processStatus
+}
+
+func (s *processState) start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch s.status {
+	case processIdle:
+		s.status = processActive
+		return nil
+	case processActive:
+		return ErrProcessActive
+	case processTerminated:
+		return ErrProcessTerminated
+	default:
+		panic("invalid process status")
+	}
+}
+
+func (s *processState) finish(stopped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.status != processActive {
+		panic("cannot finish inactive process")
+	}
+	if stopped {
+		s.status = processTerminated
+		return
+	}
+	s.status = processIdle
+}
+
+func (s *processState) terminate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch s.status {
+	case processIdle:
+		s.status = processTerminated
+		return nil
+	case processActive:
+		return ErrProcessActive
+	case processTerminated:
+		return nil
+	default:
+		panic("invalid process status")
+	}
+}
+
+// Close releases the Extism plugin instance owned by this process.
+func (process *Process[K]) Close(ctx context.Context) error {
+	if process == nil {
+		return ErrProcessRequired
+	}
+	if err := process.state.terminate(); err != nil {
+		return err
+	}
+	return process.plugin.Close(ctx)
+}
+
+// ProcessTable owns per-PID processes.
+type ProcessTable[ID comparable, K PID[ID]] interface {
+	LoadProcess(ctx context.Context, pid ID) (*Process[K], error)
+	SaveProcess(ctx context.Context, pid ID, process *Process[K]) error
+}
+
+// NewKernel compiles a program and registers the syscall host function.
+func NewKernel[ID comparable, K PID[ID]](ctx context.Context, config Config[ID, K]) (*Kernel[ID, K], error) {
+	if config.ProcessTable == nil {
+		return nil, ErrProcessTableRequired
+	}
+
+	kernel := &Kernel[ID, K]{
+		processTable:   config.ProcessTable,
+		instanceConfig: config.InstanceConfig,
+	}
+
+	runtimeConfig := config.PluginConfig.RuntimeConfig
+	if runtimeConfig == nil {
+		runtimeConfig = wazero.NewRuntimeConfig()
+	}
+	config.PluginConfig.RuntimeConfig = runtimeConfig.WithCloseOnContextDone(true)
+
+	compiled, err := extism.NewCompiledPlugin(ctx, config.Manifest, config.PluginConfig, []extism.HostFunction{
+		hostFunction(kernel.processTable),
+	})
+	if err != nil {
+		return nil, err
+	}
+	kernel.compiled = compiled
+	return kernel, nil
+}
+
+// Shutdown releases the compiled program image without touching processes or tables.
+func (k *Kernel[ID, K]) Shutdown(ctx context.Context) error {
+	return k.compiled.Close(ctx)
+}
+
+// ProcessSpec describes one process to create: its program input, entrypoint,
+// user data, and the dispatcher that will serve its syscalls.
+type ProcessSpec[ID comparable, K PID[ID]] struct {
+	Input      json.RawMessage
+	Entrypoint string
+	UserData   K
+	Dispatcher sys.Dispatcher[K]
+}
+
+// ResumeStatus is the result of one guest invocation attempt.
+type ResumeStatus string
+
+const (
+	ResumeCompleted ResumeStatus = "completed"
+	ResumeYielded   ResumeStatus = "yielded"
+	ResumeStopped   ResumeStatus = "stopped"
+	ResumeFailed    ResumeStatus = "failed"
+)
+
+// ResumeResult is delivered when the resume goroutine exits.
+type ResumeResult[K any] struct {
+	Status ResumeStatus
+	Output json.RawMessage
+	Exit   uint32
+	Err    error
+}
+
+// ResumeHandle controls one active guest invocation.
+type ResumeHandle[K any] struct {
+	results chan ResumeResult[K]
+	cancel  context.CancelFunc
+
+	mu            sync.Mutex
+	finished      bool
+	stopRequested bool
+}
+
+// Results returns the channel that receives exactly one result before closing.
+func (h *ResumeHandle[K]) Results() <-chan ResumeResult[K] {
+	if h == nil {
+		return nil
+	}
+	return h.results
+}
+
+// Stop interrupts this invocation. It is safe to call Stop more than once.
+func (h *ResumeHandle[K]) Stop() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.finished {
+		h.mu.Unlock()
+		return
+	}
+	h.stopRequested = true
+	cancel := h.cancel
+	h.mu.Unlock()
+	cancel()
+}
+
+// CreateProcess instantiates a fresh process from the kernel's program image.
+// It does not save the process; the caller decides when it becomes visible in
+// the process table.
+func (k *Kernel[ID, K]) CreateProcess(ctx context.Context, spec ProcessSpec[ID, K]) (*Process[K], error) {
+	plugin, err := k.compiled.Instance(ctx, k.instanceConfig)
+	if err != nil {
+		return nil, err
+	}
+	return &Process[K]{
+		GuestData:  spec.UserData,
+		Input:      spec.Input,
+		Entrypoint: spec.Entrypoint,
+		plugin:     plugin,
+		dispatcher: spec.Dispatcher,
+	}, nil
+}
+
+// Resume gives a process the CPU in its own goroutine and returns its control
+// handle. The process runs until it completes, yields, fails, or is stopped —
+// cooperative scheduling, no preemption.
+func (k *Kernel[ID, K]) Resume(ctx context.Context, process *Process[K]) (*ResumeHandle[K], error) {
+	if process == nil {
+		return nil, ErrProcessRequired
+	}
+	if err := process.state.start(); err != nil {
+		return nil, err
+	}
+
+	pid := process.GuestData.PID()
+	callCtx, cancel := context.WithCancel(ctx)
+	handle := &ResumeHandle[K]{
+		results: make(chan ResumeResult[K], 1),
+		cancel:  cancel,
+	}
+	go func() {
+		defer cancel()
+		defer close(handle.results)
+
+		pluginCtx := context.WithValue(callCtx, pidContextKey{}, pid)
+		exit, output, err := process.plugin.CallWithContext(pluginCtx, process.Entrypoint, process.Input)
+
+		handle.mu.Lock()
+		stopped := handle.stopRequested || ctx.Err() != nil
+		handle.finished = true
+		handle.mu.Unlock()
+
+		process.state.finish(stopped)
+
+		if stopped {
+			stopErr := callCtx.Err()
+			if stopErr == nil {
+				stopErr = context.Canceled
+			}
+			handle.results <- ResumeResult[K]{Status: ResumeStopped, Exit: exit, Err: stopErr}
+			return
+		}
+		if err != nil {
+			handle.results <- ResumeResult[K]{Status: ResumeFailed, Exit: exit, Err: err}
+			return
+		}
+		status, statusErr := resumeStatus(output)
+		if statusErr != nil {
+			handle.results <- ResumeResult[K]{
+				Status: ResumeFailed,
+				Output: append(json.RawMessage(nil), output...),
+				Exit:   exit,
+				Err:    statusErr,
+			}
+			return
+		}
+		if status == ResumeYielded {
+			handle.results <- ResumeResult[K]{
+				Status: ResumeYielded,
+				Output: append(json.RawMessage(nil), output...),
+				Exit:   exit,
+			}
+			return
+		}
+		handle.results <- ResumeResult[K]{
+			Status: ResumeCompleted,
+			Output: append(json.RawMessage(nil), output...),
+			Exit:   exit,
+		}
+	}()
+	return handle, nil
+}
+
+func resumeStatus(output []byte) (ResumeStatus, error) {
+	var envelope struct {
+		Status ResumeStatus `json:"status"`
+	}
+	if err := json.Unmarshal(output, &envelope); err != nil {
+		return ResumeFailed, errors.Join(ErrInvalidGuestOutput, err)
+	}
+	switch envelope.Status {
+	case ResumeCompleted:
+		return ResumeCompleted, nil
+	case ResumeYielded:
+		return ResumeYielded, nil
+	default:
+		return ResumeFailed, errors.Join(
+			ErrInvalidGuestOutput,
+			errors.New("status must be completed or yielded"),
+		)
+	}
+}
